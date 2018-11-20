@@ -69,6 +69,7 @@ message ClassificationLoss {
   }
 }
 
+
 // Classification loss using a sigmoid function over class predictions.
 message WeightedSigmoidClassificationLoss {
   // DEPRECATED, do not use.

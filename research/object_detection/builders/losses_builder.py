@@ -219,4 +219,5 @@ def _build_classification_loss(loss_config):
         alpha=config.alpha,
         bootstrap_type=('hard' if config.hard_bootstrap else 'soft'))
 
+
   raise ValueError('Empty loss config.')
