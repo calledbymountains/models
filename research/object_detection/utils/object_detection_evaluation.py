@@ -887,3 +887,83 @@ class ObjectDetectionEvaluation(object):
     return ObjectDetectionEvalMetrics(
         self.average_precision_per_class, mean_ap, self.precisions_per_class,
         self.recalls_per_class, self.corloc_per_class, mean_corloc)
+
+
+class PedestrianDetectionEvaluator(DetectionEvaluator):
+  """A class to perform pedestrian detection evaluation."""
+  def __init__(self,
+               cateogries,
+               matching_iou_threshold=0.5,
+               heightranges=None,
+               occlusionranges=None,
+               settingnames=None):
+    """Constructor
+    Args:
+    categories: A list of dicts, each of which has the following keys
+        id': (required) an integer id uniquely identifying this category.
+        'name': (required) string representing category name e.g., 'cat', 'dog'.
+      matching_iou_threshold: IOU threshold to use for matching groundtruth
+        boxes to detection boxes.
+        heightranges : (optional) A list of tuples. Each tuple is of the form
+     (min_height, max_height). This setting allows one to do evaluation for 
+     specific height ranges.
+        occlusionranges: (optional) A list of tuples. Each tuple is of the form
+     (min_occlusion, max_occlusion). This setting allows one to do evaluation for
+     specific occlusion ranges.
+        settingnames : (optional) A list strings. The miss-rate computed for different
+    settings are given different names.
+
+
+
+    Raises:
+      ValueError: If the category ids are not 1-indexed.
+      ValueError: If heightranges, occlusionranges and settingnames are not all None or 
+    are of different lengths.
+      ValueError: If height and occlusion tuples is not of the form (a,b) where a<=b.
+    """
+
+    super(PedestrianDetectionEvaluator, self).__init__(categories)
+    self._num_classes = max([cat['id'] for cat in categories])
+    if min(cat['id'] for cat in categories) < 1:
+      raise ValueError('Classes should be 1-indexed.')
+    self._matching_iou_threshold = matching_iou_threshold
+    self._heightranges = self._check_height(heightranges)
+    self._occlusionranges = self._check_occlusion(occlusionranges)
+    self._settingnames = self._checksettings(settingnames)
+    if not (len(self._heightranges) == len(self._occlusionranges) == len(self._settingnames)):
+      raise ValueError('The combination of heightranges, occlusionranges and settingnames is not valid.')
+
+  def _check_height(self, heightranges):
+    """Checks if the heightrange is valid. See the class documentation"""
+    if heightranges is None or len(heightranges)==0:
+      return None
+    
+    if not all([x<=y for x,y in heightranges]):
+      raise ValueError('The `heightranges` argument is not valid.')
+
+    return heightranges
+
+  def _check_occlusion(self, occlusionranges):
+    """Checks if the occlusionrange is valid. See the class documentation"""
+
+    if occlusionranges is None or len(occlusionranges) == 0:
+      return None
+
+    if not all([x<=y for x,y in occlusionranges]):
+      raise ValueError('The `occlusionranges` argument is not valid.')
+
+    return occlusionranges
+
+
+  def _checksettings(settingnames):
+    """Checks if the settingnames is valid. See the class documentation."""
+
+    if settingnames is None or len(settingnames) == 0:
+      return None
+
+    return settingnames
+
+
+
+               
+  
