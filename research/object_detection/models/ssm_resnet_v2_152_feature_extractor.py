@@ -112,34 +112,90 @@ class SSMResnetV2FeatureExtractor(
         return output_concatenated
 
 
+
+class SSMResnet50FeatureExtractor(SSMResnetV2FeatureExtractor):
+    """SSM Resnet 50 feature extractor implementation."""
+    def __init__(self,
+                 is_training,
+                 features_output_stride,
+                 batch_norm_trainable=False,
+                 reuse_weights=None,
+                 weight_decay=0.0):
+        """Constructor.
+        
+        Args:
+        is_training: See base class.
+        features_output_stride: See base class.
+        batch_norm_trainable: See base class.
+        reuse_weights: See base class.
+        weight_decay: See base class.
+        
+        Raises:
+        ValueError: If `features_output_stride` is not 8 or 16,
+        or if `architecture` is not supported.
+        """
+        
+        super(SSMResnet50FeatureExtractor, self).__init__(
+            'resnet_v2_50', resnet_v2.resnet_v2_50, is_training,
+            features_output_stride, batch_norm_trainable,
+            reuse_weights, weight_decay)
+
+class SSMResnet152FeatureExtractor(SSMResnetV2FeatureExtractor):
+    """SSM Resnet 152 feature extractor implementation."""
+    def __init__(self,
+                 is_training,
+                 features_output_stride,
+                 batch_norm_trainable=False,
+                 reuse_weights=None,
+                 weight_decay=0.0):
+        """Constructor.
+        
+        Args:
+        is_training: See base class.
+        features_output_stride: See base class.
+        batch_norm_trainable: See base class.
+        reuse_weights: See base class.
+        weight_decay: See base class.
+        
+        Raises:
+        ValueError: If `features_output_stride` is not 8 or 16,
+        or if `architecture` is not supported.
+        """
+        
+        super(SSMResnet152FeatureExtractor, self).__init__(
+            'resnet_v2_152', resnet_v2.resnet_v2_152, is_training,
+            features_output_stride, batch_norm_trainable,
+            reuse_weights, weight_decay)
+
+
     
-    class SSMResnet152FeatureExtractor(SSMResnetV2FeatureExtractor):
-        """SSM Resnet 152 feature extractor implementation."""
-        def __init__(self,
-                     is_training,
-                     features_output_stride,
-                     batch_norm_trainable=False,
-                     reuse_weights=None,
-                     weight_decay=0.0):
-            """Constructor.
-            
-            Args:
-            is_training: See base class.
-            features_output_stride: See base class.
-            batch_norm_trainable: See base class.
-            reuse_weights: See base class.
-            weight_decay: See base class.
-            
-            Raises:
-            ValueError: If `features_output_stride` is not 8 or 16,
-            or if `architecture` is not supported.
-            """
-
-            super(SSMResnet152FeatureExtractor, self).__init__(
-                'resnet_v2_152', resnet_v2.resnet_v2_152, is_training,
-                features_output_stride, batch_norm_trainable,
-                reuse_weights, weight_decay)
-
+class SSMResnet101FeatureExtractor(SSMResnetV2FeatureExtractor):
+    """SSM Resnet 101 feature extractor implementation."""
+    def __init__(self,
+                 is_training,
+                 features_output_stride,
+                 batch_norm_trainable=False,
+                 reuse_weights=None,
+                 weight_decay=0.0):
+        """Constructor.
+        
+        Args:
+        is_training: See base class.
+        features_output_stride: See base class.
+        batch_norm_trainable: See base class.
+        reuse_weights: See base class.
+        weight_decay: See base class.
+        
+        Raises:
+        ValueError: If `features_output_stride` is not 8 or 16,
+        or if `architecture` is not supported.
+        """
+        
+        super(SSMResnet152FeatureExtractor, self).__init__(
+            'resnet_v2_101', resnet_v2.resnet_v2_101, is_training,
+            features_output_stride, batch_norm_trainable,
+            reuse_weights, weight_decay)
+        
             
 
 
