@@ -104,7 +104,7 @@ class SSMMetaArch(model.DetectionModel):
                  attention_combiner_scope_fn,
                  attention_reducer_scope_fn,
                  anchor_generator,
-                 max_centers,
+                 max_anchors,
                  selection_threshold,
                  crop_and_resize_fn,
                  initial_crop_size,
@@ -112,7 +112,10 @@ class SSMMetaArch(model.DetectionModel):
                  first_stage_localization_loss_weight,
                  first_stage_classification_loss_weight,
                  second_stage_localization_loss_weight,
-                 second_stage_classification_loss_weight
+                 second_stage_classification_loss_weight,
+                 first_stage_mask_rcnn_predictor,
+                 second_stage_mask_rcnn_predictor,
+                 parallel_iterations=100
                  ):
         """FasterRCNNMetaArch Constructor.
         
@@ -151,7 +154,7 @@ class SSMMetaArch(model.DetectionModel):
         self._attention_combiner_scope_fn = attention_combiner_scope_fn
         self._attention_reducer_scope_fn = attention_reducer_scope_fn
         self._anchor_generator = anchor_generator
-        self._max_centers = max_centers
+        self._max_anchors = max_anchors
         self._selection_threshold = selection_threshold
         self._crop_and_resize_fn = crop_and_resize_fn
         self._initial_crop_size = initial_crop_size
@@ -160,7 +163,11 @@ class SSMMetaArch(model.DetectionModel):
         self._first_stage_classification_loss_weight = first_stage_classification_loss_weight
         self._second_stage_localization_loss_weight = second_stage_localization_loss_weight
         self._second_stage_classification_loss_weight = second_stage_classification_loss_weight
-
+        self._first_stage_mask_rcnn_predictor = first_stage_mask_rcnn_predictor
+        self._second_stage_mask_rcnn_predictor = second_stage_mask_rcnn_predictor
+        self._parallel_iterations = parallel_iterations
+        self._num_anchors_per_location = None
+        
     def preprocess(self, inputs):
         """Feature-extractor specific preprocessing.
         
@@ -221,6 +228,14 @@ class SSMMetaArch(model.DetectionModel):
     @property
     def feature_extractor_scope(self):
         return 'FeatureExtractor'
+    
+    @property
+    def first_stage_box_predictor_scope(self):
+        return 'CoarseStagePredictor'
+
+    @property
+    def second_stage_box_predictor_scope(self):
+        return 'FineStagePredictor'
 
     def predict(self, preprocessed_inputs, true_image_shapes):
         """Predicts unpostprocessed tensors from input tensor.
@@ -309,13 +324,16 @@ class SSMMetaArch(model.DetectionModel):
         attention_combiner_feature_output = self.build_attention_combiner_layer(semantic_attention_feature_output, self._is_training)
         attention_confidence_output = tf.nn.softmax(attention_combiner_feature_output,
                                                     axis=3)
-        pedestrian_confidence_output = attention_confidence_output[:,:,:,1]
+        # Select all but the background class.
+        pedestrian_confidence_output = attention_confidence_output[:,:,:,1:]
+        # Concatenate with the deformable convolution output feature map.
         pedestrian_selector_feature = tf.concat([pedestrian_confidence_output,
                                                  deformable_feature_output],
                                                 axis=3)
         pedestrian_reducer_feature_output = self.build_attention_reducer_layer(pedestrian_selector_feature,
                                                                                is_training)
-        pedestrian_selection_feature_map = tf.layers.conv2d(pedestrian_reducer_feature_output,
+        # Reduce the output to one feature map with one channel.
+        class_selection_feature_map = tf.layers.conv2d(pedestrian_reducer_feature_output,
                                                             filters=1,
                                                             kernel_size=3,
                                                             padding='same',
@@ -323,24 +341,96 @@ class SSMMetaArch(model.DetectionModel):
                                                             is_training=self._is_training
                                                             )
 
-        valid_pedestrian_locations = tf.where(tf.greater_equal(pedestrian_selection_feature_map, self._selection_threshold))
-        num_anchors_per_location = self._anchor_generator.num_anchors_per_location()
-        if len(num_anchors_per_location) != 1:
+        # valid_pedestrian_locations is of shape [batchsize, height, width, 1]
+        valid_locations = tf.where(tf.greater_equal(class_selection_feature_map, self._selection_threshold))
+        self._num_anchors_per_location = self._anchor_generator.num_anchors_per_location()
+        if len(self._num_anchors_per_location) != 1:
             raise RuntimeError('anchor_generator is expected to generate anchors '
                                'corresponding to a single feature map.')
-        anchors = self._anchor_generator.generate([pedestrian_selection_feature_map.shape[1],
-                                                         pedestrian_selection_feature_map.shape[2])])
+        anchors = self._anchor_generator.generate([class_selection_feature_map.shape[1],
+                                                         class_selection_feature_map.shape[2])])
+        # Anchors are designed as a list of length one with a BoxList. 
+        anchors = anchors[0]
+        # We make sure that we clip all the anchors to the image size.
+        anchors = box_list_ops.clip_to_window(anchors, window=[0.0, 0.0,
+                                                               self._image_shape[1],
+                                                               self._image_shape[2]])
+        # selected_anchors_minibatch [batchsize, max_anchors, 4] 
+        # anchor_count [batchsize]
+        selected_anchors_minibatch, anchor_count  = self.select_anchor_locations_over_batch(valid_locations, anchors)
+        coarse_input_feature_maps = self._compute_input_feature_maps(deformable_feature_output,
+                                                                     selected_anchors_minibatch)
 
-        anchors_valid_locations_unit = tf.reshape(valid_pedestrian_locations, [image_shape[0], -1,1])
-        anchors_valid_locations = tf.tile(anchors_valid_locations_unit, [1, num_anchors_per_location])
-        anchors_valid_locations = tf.reshape(anchors_valid_locations, [-1,1])
-        selected_anchors = tf.gather(anchors, anchors_valid_locations)
-        pass
-    
+        coarse_box_predictions = self._first_stage_mask_rcnn_predictor.predict(
+            [coarse_input_feature_maps],
+            num_predictions_per_location=[1],
+            scope=self.first_stage_box_predictor_scope,
+            prediction_stage=2
+            )
 
-    def convert_to_minibatch(self, valid_pedestrian_locations, anchors):
-        pass
+        refined_coarse_box_encodings = tf.squeeze(
+            coarse_box_predictions[box_predictor.BOX_ENCODINGS],
+            axis=1, name='all_refined_box_encodings')
+        coarse_class_predictions_with_background = tf.squeeze(
+            coarse_box_predictions[box_predictor.CLASS_PREDICTIONS_WITH_BACKGROUND],
+            axis=1, name='all_class_predictions_with_background')
 
+        absolute_coarse_proposal_boxes = ops.normalized_to_image_coordinates(
+            selected_anchors_minibatch, image_shape, self._parallel_iterations)
+       pass
+
+    def _compute_input_feature_maps(self, features_to_crop,
+                                                 proposal_boxes_normalized):
+        """Crops to a set of proposals from the feature map for a batch of images.
+        
+        Helper function for self._postprocess_rpn. This function calls
+        `tf.image.crop_and_resize` to create the feature map to be passed to the
+        second stage box classifier for each proposal.
+        
+        Args:
+        features_to_crop: A float32 tensor with shape
+        [batch_size, height, width, depth]
+        proposal_boxes_normalized: A float32 tensor with shape [batch_size,
+        num_proposals, box_code_size] containing proposal boxes in
+        normalized coordinates.
+        
+        Returns:
+        A float32 tensor with shape [K, new_height, new_width, depth].
+        """
+        cropped_regions = self._flatten_first_two_dimensions(
+            self._crop_and_resize_fn(
+                features_to_crop, proposal_boxes_normalized,
+                [self._initial_crop_size, self._initial_crop_size]))
+        return slim.max_pool2d(
+            cropped_regions,
+            [self._maxpool_kernel_size, self._maxpool_kernel_size],
+            stride=self._maxpool_stride)
+
+    def select_anchor_locations_over_batch(self, valid_locations, anchors):
+        """Selects the anchor center locations."""
+        def select_anchor_locations_in_one_batch(args):
+            valid_location = args[0] # [height, width, 1]
+            anchor_collection = tf.squeeze(args[1], axis=0)
+            anchor_collection = box_list.BoxList(anchor_collection)
+            valid_location = tf.reshape(valid_location, [-1, 1])
+            valid_location = tf.tile(valid_location, [1, self._num_anchors_per_location])
+            valid_location = tf.reshape(valid_location, [-1])
+            selected_anchors = box_list_ops.boolean_mask(anchor_collection, valid_location)
+            # We normalize the selected_anchors
+            selected_anchors = box_list_ops.to_normalized_coordinates(selected_anchors,
+                                                                      height=self._image_shape[1],
+                                                                      width=self._image_shape[2])
+            num_anchors = selected_anchors.num_boxes()
+            num_anchors = tf.cond(tf.less_equal(num_anchors, self._max_anchors), lambda: num_anchors,
+                                  lambda: self._max_anchors)
+            batched_selected_anchors = box_list_ops.pad_or_clip_box_list(selected_anchors,
+                                                                         num_boxes, self._max_anchors).get()
+            return batched_selected_anchors, return num_anchors
+
+        anchors = tf.tile(tf.expand_dims(anchors.get(), axis=0), [self._num_anchors_per_location, 1, 1])
+        selected_anchors_minibatch = tf.map_fn(select_anchor_locations_in_one_batch,
+                                               (valid_locations, anchors), dtype=(tf.float32, tf.int32))
+        return selected_anchors_minibatch
 
     def predict_coarse_stage(self, feature_map_to_crop, selected_anchors, image_shape, true_image_shapes):
         """Predicts the coarse stage of classification and prediction."""
@@ -436,25 +526,109 @@ class SSMMetaArch(model.DetectionModel):
                                                         activation=tf.nn.relu,
                                                         trainable=is_training)
         return attention_reducer_output
-        
 
-    
-                                      
+    def _flatten_first_two_dimensions(self, inputs):
+        """Flattens `K-d` tensor along batch dimension to be a `(K-1)-d` tensor.
+        
+        Converts `inputs` with shape [A, B, ..., depth] into a tensor of shape
+        [A * B, ..., depth].
+        
+        Args:
+        inputs: A float tensor with shape [A, B, ..., depth].  Note that the first
+        two and last dimensions must be statically defined.
+        Returns:
+        A float tensor with shape [A * B, ..., depth] (where the first and last
+        dimension are statically defined.
+        """
+        combined_shape = shape_utils.combined_static_and_dynamic_shape(inputs)
+        flattened_shape = tf.stack([combined_shape[0] * combined_shape[1]] +
+                                   combined_shape[2:])
+        return tf.reshape(inputs, flattened_shape)
+
+    def _postprocess_box_classifier(self,
+                                    refined_box_encodings,
+                                    class_predictions_with_background,
+                                    proposal_boxes,
+                                    num_proposals,
+                                    image_shapes,
+                                    mask_predictions=None):
+        """Converts predictions from the second stage box classifier to detections.
+        
+        Args:
+        refined_box_encodings: a 3-D float tensor with shape
+        [total_num_padded_proposals, num_classes, self._box_coder.code_size]
+        representing predicted (final) refined box encodings. If using a shared
+        box across classes the shape will instead be
+        [total_num_padded_proposals, 1, 4]
+        class_predictions_with_background: a 3-D tensor float with shape
+        [total_num_padded_proposals, num_classes + 1] containing class
+        predictions (logits) for each of the proposals.  Note that this tensor
+        *includes* background class predictions (at class index 0).
+        proposal_boxes: a 3-D float tensor with shape
+        [batch_size, self.max_num_proposals, 4] representing decoded proposal
+        bounding boxes in absolute coordinates.
+        num_proposals: a 1-D int32 tensor of shape [batch] representing the number
+        of proposals predicted for each image in the batch.
+        image_shapes: a 2-D int32 tensor containing shapes of input image in the
+        batch.
+        mask_predictions: (optional) a 4-D float tensor with shape
+        [total_num_padded_proposals, num_classes, mask_height, mask_width]
+        containing instance mask prediction logits.
+        
+        Returns:
+        A dictionary containing:
+        `detection_boxes`: [batch, max_detection, 4] in normalized co-ordinates.
+        `detection_scores`: [batch, max_detections]
+        `detection_classes`: [batch, max_detections]
+        `num_detections`: [batch]
+        `detection_masks`:
+        (optional) [batch, max_detections, mask_height, mask_width]. Note
+        that a pixel-wise sigmoid score converter is applied to the detection
+        masks.
+        """
+        refined_box_encodings_batch = tf.reshape(
+            refined_box_encodings,
+            [-1,
+             self.max_num_proposals,
+             refined_box_encodings.shape[1],
+             self._box_coder.code_size])
+        class_predictions_with_background_batch = tf.reshape(
+            class_predictions_with_background,
+            [-1, self.max_num_proposals, self.num_classes + 1]
+        )
+        refined_decoded_boxes_batch = self._batch_decode_boxes(
+            refined_box_encodings_batch, proposal_boxes)
+        class_predictions_with_background_batch = (
+            self._second_stage_score_conversion_fn(
+                class_predictions_with_background_batch))
+        class_predictions_batch = tf.reshape(
+            tf.slice(class_predictions_with_background_batch,
+                     [0, 0, 1], [-1, -1, -1]),
+            [-1, self.max_num_proposals, self.num_classes])
+        clip_window = self._compute_clip_window(image_shapes)
+        mask_predictions_batch = None
+        if mask_predictions is not None:
+            mask_height = mask_predictions.shape[2].value
+            mask_width = mask_predictions.shape[3].value
+            mask_predictions = tf.sigmoid(mask_predictions)
+            mask_predictions_batch = tf.reshape(
+                mask_predictions, [-1, self.max_num_proposals,
+                                   self.num_classes, mask_height, mask_width])
             
-        
-        
-            
-            
-        
-
-        
-        
-
-        
-        
-                 
-
-
-
-        
-                 
+            (nmsed_boxes, nmsed_scores, nmsed_classes, nmsed_masks, _,
+             num_detections) = self._second_stage_nms_fn(
+                 refined_decoded_boxes_batch,
+                 class_predictions_batch,
+                 clip_window=clip_window,
+                 change_coordinate_frame=True,
+                 num_valid_boxes=num_proposals,
+                 masks=mask_predictions_batch)
+            detections = {
+                fields.DetectionResultFields.detection_boxes: nmsed_boxes,
+                fields.DetectionResultFields.detection_scores: nmsed_scores,
+                fields.DetectionResultFields.detection_classes: nmsed_classes,
+                fields.DetectionResultFields.num_detections: tf.to_float(num_detections)
+            }
+            if nmsed_masks is not None:
+                detections[fields.DetectionResultFields.detection_masks] = nmsed_masks
+        return detections
