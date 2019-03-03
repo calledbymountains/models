@@ -12,13 +12,9 @@ def build(spatial_attention_config, is_training):
             hyperparams_builder.build(semantic_attention_config, is_training)
             )
 
-    attention_combiner_scope_fn  = hyperparams_builder.build(
-        spatial_attention_config.attention_combiner)
-    attention_reducer_scope_fn  = hyperparams_builder.build(
-        spatial_attention_config.attention_reducer)
-    return semantic_attention_layer_scope_fn,
-    attention_combiner_scope_fn,
-    attention_reducer_scope_fn
+    attention_combiner_scope_fn  = hyperparams_builder.build(spatial_attention_config.attention_combiner, is_training)
+    attention_reducer_scope_fn  = hyperparams_builder.build(spatial_attention_config.attention_reducer, is_training)
+    return semantic_attention_layer_scope_fn, attention_combiner_scope_fn, attention_reducer_scope_fn
 
     
     

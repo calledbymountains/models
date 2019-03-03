@@ -2,7 +2,7 @@ import tensorflow as tf
 
 from object_detection.meta_architectures import ssm_meta_arch
 from nets import resnet_utils
-from nets import resnet_v1
+from nets import resnet_v2
 
 
 slim = tf.contrib.slim
@@ -57,8 +57,8 @@ class SSMResnetV2FeatureExtractor(
         tensor representing a batch of images.
         
         """
-    channel_means = [123.68, 116.779, 103.939]
-    return resized_inputs - [[channel_means]]
+        channel_means = [123.68, 116.779, 103.939]
+        return resized_inputs - [[channel_means]]
 
 
     def _extract_input_features(self, preprocessed_inputs, scope):

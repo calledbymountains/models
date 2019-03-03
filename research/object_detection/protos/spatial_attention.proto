@@ -5,18 +5,14 @@ package object_detection.protos;
 import "object_detection/protos/hyperparams.proto";
 
 message SpatialAttention{
-    # Separable convolution parameters for depthwise 
-    # separable convolution.
+
     optional Hyperparams depthwise_separable_conv = 1;
-    # deformable convolution layer parameters
+
     required Hyperparams deformable_conv = 2;
-    # Convolution parameters for semantic segmentation
-    # layer.
+
     repeated Hyperparams semantic_attention = 3;
-    # Convolution parameters for combining the 
-    # outputs of the semantic attention layer.
+
     required Hyperparams attention_combiner = 4;
-    # Convolution parameters for obtaining the final
-    # attention map from which anchor centers are selected.
+
     required Hyperparams attention_reducer = 5;
 }

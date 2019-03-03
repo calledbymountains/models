@@ -47,6 +47,9 @@ def get_image_resizer_config(model_config):
   if meta_architecture == "ssd":
     return model_config.ssd.image_resizer
 
+  if meta_architecture =='ssm':
+    return model_config.ssm.image_resizer
+
   raise ValueError("Unknown model type: {}".format(meta_architecture))
 
 
@@ -256,7 +259,10 @@ def get_number_of_classes(model_config):
   if meta_architecture == "ssd":
     return model_config.ssd.num_classes
 
-  raise ValueError("Expected the model to be one of 'faster_rcnn' or 'ssd'.")
+  if meta_architecture == 'ssm':
+    return model_config.ssm.num_classes
+
+  raise ValueError("Expected the model to be one of 'faster_rcnn' or 'ssd' or 'ssm'.")
 
 
 def get_optimizer_type(train_config):

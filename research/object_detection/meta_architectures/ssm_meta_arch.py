@@ -13,6 +13,7 @@ from object_detection.core import target_assigner
 from object_detection.utils import ops
 from object_detection.utils import shape_utils
 
+
 slim = tf.contrib.slim
 
 
@@ -110,17 +111,21 @@ class SSMMetaArch(model.DetectionModel):
                  crop_and_resize_fn,
                  initial_crop_size,
                  maxpool_kernel_size,
+                 maxpool_kernel_stride,
                  first_stage_localization_loss_weight,
                  first_stage_classification_loss_weight,
                  second_stage_localization_loss_weight,
                  second_stage_classification_loss_weight,
                  first_stage_mask_rcnn_predictor,
                  second_stage_mask_rcnn_predictor,
-                 coarse_stage_nms_fn,
                  fine_stage_nms_fn,
-                 coarse_stage_box_score_conversion_fn,
                  fine_stage_box_score_conversion_fn,
-                 parallel_iterations=100
+                 coarse_stage_target_assigner,
+                 fine_stage_target_assigner,
+                 coarse_stage_cls_loss,
+                 fine_stage_cls_loss,
+                 parallel_iterations=100,
+                 add_summaries=False
                  ):
         """FasterRCNNMetaArch Constructor.
 
@@ -153,8 +158,8 @@ class SSMMetaArch(model.DetectionModel):
 
         self._is_training = is_training,
         self._image_resizer_fn = image_resizer_fn
-        self._feature_extractor = feature_extractor,
-        self._depthwise_separable_layer_scope_fn = depthwise_separable_layer_scope_fn,
+        self._feature_extractor = feature_extractor
+        self._depthwise_separable_layer_scope_fn = depthwise_separable_layer_scope_fn
         self._semantic_attention_layer_scope_fn = semantic_attention_layer_scope_fn
         self._attention_combiner_scope_fn = attention_combiner_scope_fn
         self._attention_reducer_scope_fn = attention_reducer_scope_fn
@@ -164,6 +169,7 @@ class SSMMetaArch(model.DetectionModel):
         self._crop_and_resize_fn = crop_and_resize_fn
         self._initial_crop_size = initial_crop_size
         self._maxpool_kernel_size = maxpool_kernel_size
+        self._maxpool_kernel_stride = maxpool_kernel_stride,
         self._first_stage_localization_loss_weight = first_stage_localization_loss_weight
         self._first_stage_classification_loss_weight = first_stage_classification_loss_weight
         self._second_stage_localization_loss_weight = second_stage_localization_loss_weight
@@ -172,6 +178,15 @@ class SSMMetaArch(model.DetectionModel):
         self._second_stage_mask_rcnn_predictor = second_stage_mask_rcnn_predictor
         self._parallel_iterations = parallel_iterations
         self._num_anchors_per_location = None
+        self._fine_stage_nms_fn = fine_stage_nms_fn
+        self._fine_stage_box_score_conversion_fn = fine_stage_box_score_conversion_fn,
+        self._coarse_stage_target_assigner = coarse_stage_target_assigner
+        self._fine_stage_target_assigner = fine_stage_target_assigner
+        self._coarse_stage_cls_loss = coarse_stage_cls_loss
+        self._fine_stage_cls_loss = fine_stage_cls_loss
+
+
+
 
     def preprocess(self, inputs):
         """Feature-extractor specific preprocessing.
@@ -207,8 +222,7 @@ class SSMMetaArch(model.DetectionModel):
                 parallel_iterations=self._parallel_iterations)
             resized_inputs = outputs[0]
             true_image_shapes = outputs[1]
-            return (self._feature_extractor.preprocess(resized_inputs),
-                    true_image_shapes)
+            return self._feature_extractor.preprocess(resized_inputs), true_image_shapes
 
     def _compute_clip_window(self, image_shapes):
         """Computes clip window for non max suppression based on image shapes.
@@ -330,9 +344,6 @@ class SSMMetaArch(model.DetectionModel):
         deformable_feature_output = self.build_deformable_conv_layer(
             depthwise_separable_output, self._is_training)
 
-        if self._is_training:
-            deformable_feature_output = tf.stop_gradient(
-                deformable_feature_output)
         semantic_attention_feature_output = self.build_semantic_attention_layer(
             deformable_feature_output, self._is_training)
         attention_combiner_feature_output = self.build_attention_combiner_layer(
@@ -389,13 +400,13 @@ class SSMMetaArch(model.DetectionModel):
             anchor_count,
             image_shape)
 
-        coarse_detection_dict = self._postprocess_box_classifier(
-            coarse_prediction_dict['refined_box_encodings'],
-            coarse_prediction_dict['class_predictions_with_background'],
-            coarse_prediction_dict['proposal_boxes'],
-            coarse_prediction_dict['num_proposals'],
-            true_image_shapes
-            )
+        # coarse_detection_dict = self._postprocess_box_classifier(
+        #     coarse_prediction_dict['refined_box_encodings'],
+        #     coarse_prediction_dict['class_predictions_with_background'],
+        #     coarse_prediction_dict['proposal_boxes'],
+        #     coarse_prediction_dict['num_proposals'],
+        #     true_image_shapes
+        #     )
 
         refined_box_encodings = coarse_prediction_dict['refined_box_encodings']
         refined_box_encodings = self._batch_decode_boxes(refined_box_encodings,
@@ -409,17 +420,20 @@ class SSMMetaArch(model.DetectionModel):
                                                        image_shape)
 
 
-        fine_detection_dict = self._postprocess_box_classifier(
-            fine_prediction_dict['refined_box_encodings'],
-            fine_prediction_dict['class_predictions_with_background'],
-            fine_prediction_dict['proposal_boxes'],
-            fine_prediction_dict['num_proposals'],
-            true_image_shapes
-            )
+        # fine_detection_dict = self._postprocess_box_classifier(
+        #     fine_prediction_dict['refined_box_encodings'],
+        #     fine_prediction_dict['class_predictions_with_background'],
+        #     fine_prediction_dict['proposal_boxes'],
+        #     fine_prediction_dict['num_proposals'],
+        #     true_image_shapes
+        #     )
 
-        return dict(coarse=coarse_detection_dict,
-                    fine=fine_detection_dict,
-                    spatial_softmax=class_selection_feature_map)
+        return dict(coarse=coarse_prediction_dict,
+                    fine=fine_prediction_dict,
+                    spatial_softmax=class_selection_feature_map,
+                    attention_combiner_feature_output=tf.image.resize_images(attention_combiner_feature_output,
+                                                                             [image_shape[1], image_shape[2]])
+                    )
 
 
     def _compute_input_feature_maps(self, features_to_crop,
@@ -578,7 +592,7 @@ class SSMMetaArch(model.DetectionModel):
 
     def build_depthwise_separable_layer(self, feature_extractor_output_map,
                                         is_training):
-        with slim.arg_scope(self._depthwise_separable_layer_scope_fn):
+        with slim.arg_scope(self._depthwise_separable_layer_scope_fn()):
             depthwise_feature_out = tf.layers.separable_conv2d(
                 inputs=feature_extractor_output_map,
                 filters=512,
@@ -603,11 +617,12 @@ class SSMMetaArch(model.DetectionModel):
 
     def build_deformable_conv_layer(self, depthwise_feature_output,
                                     is_training):
-        offset = tl.layers.Conv2d(depthwise_feature_output, 18, (3, 3), (1, 1),
+        depthwise_feature_tl = tl.layers.InputLayer(depthwise_feature_output)
+        offset = tl.layers.Conv2d(depthwise_feature_tl, 18, (3, 3), (1, 1),
                                   act=None,
                                   padding='same')
         deformable_feature_output = tl.layers.DeformableConv2d(
-            depthwise_feature_output,
+            depthwise_feature_tl,
             offset,
             512,
             act=tf.nn.relu
@@ -617,26 +632,28 @@ class SSMMetaArch(model.DetectionModel):
     def build_semantic_attention_layer(self, depthwise_feature_output,
                                        is_training):
         atrous_rates = list(range(len(self._semantic_attention_layer_scope_fn)))
-        atrous_rates += 1
+        atrous_rates = [x + 1 for x in atrous_rates]
         semantic_attention_outputs = []
         for attention_layer_scope_fn, atrous_rate in zip(
                 self._semantic_attention_layer_scope_fn, atrous_rates):
-            with slim.arg_scope(attention_layer_scope_fn):
-                output = tf.layers.conv2d(depthwise_feature_output,
+            with slim.arg_scope(attention_layer_scope_fn()):
+                output = tf.layers.conv2d(depthwise_feature_output.outputs,
                                           filters=64,
                                           kernel_size=3,
                                           padding='same',
                                           dilation_rate=atrous_rate,
-                                          activation=tf.nn.relu)
+                                          activation=tf.nn.relu,
+                                          trainable=is_training)
                 semantic_attention_outputs.append(output)
 
+        print(semantic_attention_outputs)
         semantic_attention_output = tf.concat(semantic_attention_outputs,
                                               axis=3)
         return semantic_attention_output
 
     def build_attention_combiner_layer(self, attention_feature_output,
                                        is_training):
-        with slim.arg_scope(self._attention_combiner_scope_fn):
+        with slim.arg_scope(self._attention_combiner_scope_fn()):
             attention_combiner_output = tf.layers.conv2d(
                 attention_feature_output,
                 filters=self._num_classes,
@@ -901,11 +918,12 @@ class SSMMetaArch(model.DetectionModel):
             'second_stage_classification_loss') to scalar tensors representing
             corresponding loss values.
         """
-        with tf.name_scope(scope, 'Loss', prediction_dict.values()):
-            (groundtruth_boxlists, groundtruth_classes_with_background_list,
-             groundtruth_masks_list, groundtruth_weights_list
-             ) = self._format_groundtruth_data(true_image_shapes)
-            prediction_dict_coarse = prediction_dict['coarse']
+
+        (groundtruth_boxlists, groundtruth_classes_with_background_list,
+         groundtruth_masks_list, groundtruth_weights_list
+         ) = self._format_groundtruth_data(true_image_shapes)
+        prediction_dict_coarse = prediction_dict['coarse']
+        with tf.name_scope(scope, 'CoarseStageLoss', prediction_dict.values()):
             loss_dict = self._loss_box_classifier(
                     prediction_dict_coarse['refined_box_encodings'],
                     prediction_dict_coarse['class_predictions_with_background'],
@@ -918,7 +936,8 @@ class SSMMetaArch(model.DetectionModel):
                     prediction_dict.get('mask_predictions'),
                     groundtruth_masks_list
                 )
-            prediction_dict_fine = prediction_dict['fine']
+        prediction_dict_fine = prediction_dict['fine']
+        with tf.name_scope(scope, 'FineStageLoss', prediction_dict.values()):
             loss_dict.update(self._loss_box_classifier(
                     prediction_dict_fine['refined_box_encodings'],
                     prediction_dict_fine['class_predictions_with_background'],
@@ -931,6 +950,7 @@ class SSMMetaArch(model.DetectionModel):
                     prediction_dict.get('mask_predictions'),
                     groundtruth_masks_list
                 ))
+
         return loss_dict
 
     def _loss_box_classifier(self,
@@ -942,6 +962,7 @@ class SSMMetaArch(model.DetectionModel):
                              groundtruth_classes_with_background_list,
                              groundtruth_weights_list,
                              image_shape,
+                             detector_target_assigner,
                              prediction_masks=None,
                              groundtruth_masks_list=None):
         """Computes scalar box classifier loss tensors.
@@ -999,7 +1020,7 @@ class SSMMetaArch(model.DetectionModel):
         """
         with tf.name_scope('BoxClassifierLoss'):
             paddings_indicator = self._padded_batched_proposals_indicator(
-                num_proposals, self.max_num_proposals)
+                num_proposals, self.max_anchors)
             proposal_boxlists = [
                 box_list.BoxList(proposal_boxes_single_image)
                 for proposal_boxes_single_image in tf.unstack(proposal_boxes)]
@@ -1013,7 +1034,7 @@ class SSMMetaArch(model.DetectionModel):
             (batch_cls_targets_with_background, batch_cls_weights,
              batch_reg_targets,
              batch_reg_weights, _) = target_assigner.batch_assign_targets(
-                target_assigner=self._detector_target_assigner,
+                target_assigner=detector_target_assigner,
                 anchors_batch=proposal_boxlists,
                 gt_box_batch=groundtruth_boxlists,
                 gt_class_targets_batch=groundtruth_classes_with_background_list,
@@ -1038,7 +1059,7 @@ class SSMMetaArch(model.DetectionModel):
             if refined_box_encodings.shape[1] == 1:
                 reshaped_refined_box_encodings = tf.reshape(
                     refined_box_encodings,
-                    [batch_size, self.max_num_proposals,
+                    [batch_size, self.max_anchors,
                      self._box_coder.code_size])
             # For anchors with multiple labels, picks refined_location_encodings
             # for just one class to avoid over-counting for regression loss and
@@ -1299,3 +1320,81 @@ class SSMMetaArch(model.DetectionModel):
         feature_extractor_variables = tf.contrib.framework.filter_variables(
             variables_to_restore, include_patterns=include_patterns)
         return {var.op.name: var for var in feature_extractor_variables}
+
+
+    def postprocess(self, prediction_dict, true_image_shapes):
+        """Convert prediction tensors to final detections.
+
+        This function converts raw predictions tensors to final detection results.
+        See base class for output format conventions.  Note also that by default,
+        scores are to be interpreted as logits, but if a score_converter is used,
+        then scores are remapped (and may thus have a different interpretation).
+
+        If number_of_stages=1, the returned results represent proposals from the
+        first stage RPN and are padded to have self.max_num_proposals for each
+        image; otherwise, the results can be interpreted as multiclass detections
+        from the full two-stage model and are padded to self._max_detections.
+
+        Args:
+          prediction_dict: a dictionary holding prediction tensors (see the
+            documentation for the predict method.  If number_of_stages=1, we
+            expect prediction_dict to contain `rpn_box_encodings`,
+            `rpn_objectness_predictions_with_background`, `rpn_features_to_crop`,
+            and `anchors` fields.  Otherwise we expect prediction_dict to
+            additionally contain `refined_box_encodings`,
+            `class_predictions_with_background`, `num_proposals`,
+            `proposal_boxes` and, optionally, `mask_predictions` fields.
+          true_image_shapes: int32 tensor of shape [batch, 3] where each row is
+            of the form [height, width, channels] indicating the shapes
+            of true images in the resized images, as resized images can be padded
+            with zeros.
+
+        Returns:
+          detections: a dictionary containing the following fields
+            detection_boxes: [batch, max_detection, 4]
+            detection_scores: [batch, max_detections]
+            detection_classes: [batch, max_detections]
+              (this entry is only created if rpn_mode=False)
+            num_detections: [batch]
+
+        Raises:
+          ValueError: If `predict` is called before `preprocess`.
+        """
+
+        # with tf.name_scope('FirstStagePostprocessor'):
+        #   if self._number_of_stages == 1:
+        #     proposal_boxes, proposal_scores, num_proposals = self._postprocess_rpn(
+        #         prediction_dict['rpn_box_encodings'],
+        #         prediction_dict['rpn_objectness_predictions_with_background'],
+        #         prediction_dict['anchors'],
+        #         true_image_shapes,
+        #         true_image_shapes)
+        #     return {
+        #         fields.DetectionResultFields.detection_boxes: proposal_boxes,
+        #         fields.DetectionResultFields.detection_scores: proposal_scores,
+        #         fields.DetectionResultFields.num_detections:
+        #             tf.to_float(num_proposals),
+        #     }
+
+        # TODO(jrru): Remove mask_predictions from _post_process_box_classifier.
+        with tf.name_scope('FineStagePostprocessor'):
+          mask_predictions = prediction_dict.get(box_predictor.MASK_PREDICTIONS)
+          detections_dict = self._postprocess_box_classifier(
+            prediction_dict['refined_box_encodings'],
+            prediction_dict['class_predictions_with_background'],
+            prediction_dict['proposal_boxes'],
+            prediction_dict['num_proposals'],
+            true_image_shapes,
+            mask_predictions=mask_predictions)
+        return detections_dict
+
+        # if self._number_of_stages == 3:
+        #   # Post processing is already performed in 3rd stage. We need to transfer
+        #   # postprocessed tensors from `prediction_dict` to `detections_dict`.
+        #   detections_dict = {}
+        #   for key in prediction_dict:
+        #     if key == fields.DetectionResultFields.detection_masks:
+        #       detections_dict[key] = tf.sigmoid(prediction_dict[key])
+        #     elif 'detection' in key:
+        #       detections_dict[key] = prediction_dict[key]
+        #   return detections_dict
