@@ -355,7 +355,7 @@ class SSMMetaArch(model.DetectionModel):
         pedestrian_confidence_output = attention_confidence_output[:, :, :, 1:]
         # Concatenate with the deformable convolution output feature map.
         pedestrian_selector_feature = tf.concat([pedestrian_confidence_output,
-                                                 deformable_feature_output],
+                                                 deformable_feature_output.outputs],
                                                 axis=3)
         pedestrian_reducer_feature_output = self.build_attention_reducer_layer(
             pedestrian_selector_feature,
@@ -367,7 +367,7 @@ class SSMMetaArch(model.DetectionModel):
             kernel_size=3,
             padding='same',
             activation=tf.nn.relu,
-            is_training=self._is_training
+            trainable=self._is_training
         )
 
         # valid_pedestrian_locations is of shape [batchsize, height, width, 1]
@@ -379,15 +379,15 @@ class SSMMetaArch(model.DetectionModel):
                 'anchor_generator is expected to generate anchors '
                 'corresponding to a single feature map.')
         anchors = self._anchor_generator.generate(
-            [class_selection_feature_map.shape[1],
-             class_selection_feature_map.shape[2]])
+            [(class_selection_feature_map.shape[1],
+             class_selection_feature_map.shape[2])])
         # Anchors are designed as a list of length one with a BoxList.
         anchors = anchors[0]
         # We make sure that we clip all the anchors to the image size.
-        anchors = box_list_ops.clip_to_window(anchors, window=[0.0, 0.0,
-                                                               self._image_shape[
+        anchors = box_list_ops.clip_to_window(anchors, window=[0, 0,
+                                                               image_shape[
                                                                    1],
-                                                               self._image_shape[
+                                                               image_shape[
                                                                    2]])
         # selected_anchors_minibatch [batchsize, max_anchors, 4]
         # anchor_count [batchsize]
@@ -395,7 +395,7 @@ class SSMMetaArch(model.DetectionModel):
             valid_locations, anchors)
 
         coarse_prediction_dict = self.predict_coarse_stage(
-            deformable_feature_output,
+            deformable_feature_output.outputs,
             selected_anchors_minibatch,
             anchor_count,
             image_shape)
@@ -414,7 +414,7 @@ class SSMMetaArch(model.DetectionModel):
 
         refined_box_encodings = tf.reshape(refined_box_encodings, [image_shape[0], -1, 4])
 
-        fine_prediction_dict = self.predict_fine_stage(deformable_feature_output,
+        fine_prediction_dict = self.predict_fine_stage(deformable_feature_output.outputs,
                                                        refined_box_encodings,
                                                        anchor_count,
                                                        image_shape)
@@ -646,7 +646,6 @@ class SSMMetaArch(model.DetectionModel):
                                           trainable=is_training)
                 semantic_attention_outputs.append(output)
 
-        print(semantic_attention_outputs)
         semantic_attention_output = tf.concat(semantic_attention_outputs,
                                               axis=3)
         return semantic_attention_output
@@ -665,7 +664,7 @@ class SSMMetaArch(model.DetectionModel):
 
     def build_attention_reducer_layer(self, pedestrian_selector_feature,
                                       is_training):
-        with slim.arg_scope(self._attention_reducer_scope_fn):
+        with slim.arg_scope(self._attention_reducer_scope_fn()):
             attention_reducer_output = tf.layers.conv2d(
                 pedestrian_selector_feature,
                 filters=64,
