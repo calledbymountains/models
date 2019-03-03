@@ -329,6 +329,10 @@ class SSMMetaArch(model.DetectionModel):
             feature_extractor_output_map, self._is_training)
         deformable_feature_output = self.build_deformable_conv_layer(
             depthwise_separable_output, self._is_training)
+
+        if self._is_training:
+            deformable_feature_output = tf.stop_gradient(
+                deformable_feature_output)
         semantic_attention_feature_output = self.build_semantic_attention_layer(
             deformable_feature_output, self._is_training)
         attention_combiner_feature_output = self.build_attention_combiner_layer(
@@ -378,47 +382,45 @@ class SSMMetaArch(model.DetectionModel):
         # anchor_count [batchsize]
         selected_anchors_minibatch, anchor_count = self.select_anchor_locations_over_batch(
             valid_locations, anchors)
-        coarse_input_feature_maps = self._compute_input_feature_maps(
+
+        coarse_prediction_dict = self.predict_coarse_stage(
             deformable_feature_output,
-            selected_anchors_minibatch)
+            selected_anchors_minibatch,
+            anchor_count,
+            image_shape)
 
-        coarse_box_predictions = self._first_stage_mask_rcnn_predictor.predict(
+        coarse_detection_dict = self._postprocess_box_classifier(
+            coarse_prediction_dict['refined_box_encodings'],
+            coarse_prediction_dict['class_predictions_with_background'],
+            coarse_prediction_dict['proposal_boxes'],
+            coarse_prediction_dict['num_proposals'],
+            true_image_shapes
+            )
 
-            [coarse_input_feature_maps],
-            num_predictions_per_location=[1],
-            scope=self.first_stage_box_predictor_scope,
-            prediction_stage=2
-        )
+        refined_box_encodings = coarse_prediction_dict['refined_box_encodings']
+        refined_box_encodings = self._batch_decode_boxes(refined_box_encodings,
+                                                         selected_anchors_minibatch)
 
-        refined_coarse_box_encodings = tf.squeeze(
-            coarse_box_predictions[box_predictor.BOX_ENCODINGS],
-            axis=1, name='all_refined_box_encodings')
-        coarse_class_predictions_with_background = tf.squeeze(
-            coarse_box_predictions[box_predictor.CLASS_PREDICTIONS_WITH_BACKGROUND],
-            axis=1, name='all_class_predictions_with_background')
+        refined_box_encodings = tf.reshape(refined_box_encodings, [image_shape[0], -1, 4])
 
-        absolute_coarse_proposal_boxes = ops.normalized_to_image_coordinates(
-            selected_anchors_minibatch, image_shape, self._parallel_iterations)
-
-        coarse_prediction_dict = {
-            'refined_box_encodings': refined_coarse_box_encodings,
-            'class_predictions_with_background':
-                coarse_class_predictions_with_background,
-            'num_proposals': anchor_count,
-            'proposal_boxes': absolute_coarse_proposal_boxes,
-            'proposal_boxes_normalized': selected_anchors_minibatch,
-        }
-
-        coarse_detection_dict = self._postprocess_box_classifier(coarse_prediction_dict['refined_box_encodings'],
-                                                                 coarse_prediction_dict['class_predictions_with_background'],
-                                                                 coarse_prediction_dict['proposal_boxes'],
-                                                                 coarse_prediction_dict['num_proposals'],
-                                                                 true_image_shapes
-                                                                 )
+        fine_prediction_dict = self.predict_fine_stage(deformable_feature_output,
+                                                       refined_box_encodings,
+                                                       anchor_count,
+                                                       image_shape)
 
 
+        fine_detection_dict = self._postprocess_box_classifier(
+            fine_prediction_dict['refined_box_encodings'],
+            fine_prediction_dict['class_predictions_with_background'],
+            fine_prediction_dict['proposal_boxes'],
+            fine_prediction_dict['num_proposals'],
+            true_image_shapes
+            )
 
-    pass
+        return dict(coarse=coarse_detection_dict,
+                    fine=fine_detection_dict,
+                    spatial_softmax=class_selection_feature_map)
+
 
     def _compute_input_feature_maps(self, features_to_crop,
                                     proposal_boxes_normalized):
@@ -483,10 +485,78 @@ class SSMMetaArch(model.DetectionModel):
         return selected_anchors_minibatch
 
     def predict_coarse_stage(self, feature_map_to_crop, selected_anchors,
-                             image_shape, true_image_shapes):
+                             num_anchors,
+                             image_shape):
         """Predicts the coarse stage of classification and prediction."""
-        image_shape_2d = self._image_batch_shape_2d(image_shape)
-        pass
+        coarse_input_feature_maps = self._compute_input_feature_maps(
+            feature_map_to_crop,
+            selected_anchors)
+
+        coarse_box_predictions = self._first_stage_mask_rcnn_predictor.predict(
+
+            [coarse_input_feature_maps],
+            num_predictions_per_location=[1],
+            scope=self.first_stage_box_predictor_scope,
+            prediction_stage=2
+        )
+
+        refined_coarse_box_encodings = tf.squeeze(
+            coarse_box_predictions[box_predictor.BOX_ENCODINGS],
+            axis=1, name='all_refined_box_encodings')
+        coarse_class_predictions_with_background = tf.squeeze(
+            coarse_box_predictions[
+                box_predictor.CLASS_PREDICTIONS_WITH_BACKGROUND],
+            axis=1, name='all_class_predictions_with_background')
+
+        absolute_coarse_proposal_boxes = ops.normalized_to_image_coordinates(
+            selected_anchors, image_shape, self._parallel_iterations)
+
+        coarse_prediction_dict = {
+            'refined_box_encodings': refined_coarse_box_encodings,
+            'class_predictions_with_background':
+                coarse_class_predictions_with_background,
+            'num_proposals': num_anchors,
+            'proposal_boxes': absolute_coarse_proposal_boxes,
+            'proposal_boxes_normalized': selected_anchors,
+        }
+        return coarse_prediction_dict
+
+    def predict_fine_stage(self, feature_map_to_crop, selected_anchors,
+                           num_anchors,
+                           image_shape):
+        """Predicts the coarse stage of classification and prediction."""
+        coarse_input_feature_maps = self._compute_input_feature_maps(
+            feature_map_to_crop,
+            selected_anchors)
+
+        coarse_box_predictions = self._first_stage_mask_rcnn_predictor.predict(
+
+            [coarse_input_feature_maps],
+            num_predictions_per_location=[1],
+            scope=self.first_stage_box_predictor_scope,
+            prediction_stage=2
+        )
+
+        refined_coarse_box_encodings = tf.squeeze(
+            coarse_box_predictions[box_predictor.BOX_ENCODINGS],
+            axis=1, name='all_refined_box_encodings')
+        coarse_class_predictions_with_background = tf.squeeze(
+            coarse_box_predictions[
+                box_predictor.CLASS_PREDICTIONS_WITH_BACKGROUND],
+            axis=1, name='all_class_predictions_with_background')
+
+        absolute_coarse_proposal_boxes = ops.normalized_to_image_coordinates(
+            selected_anchors, image_shape, self._parallel_iterations)
+
+        coarse_prediction_dict = {
+            'refined_box_encodings': refined_coarse_box_encodings,
+            'class_predictions_with_background':
+                coarse_class_predictions_with_background,
+            'num_proposals': num_anchors,
+            'proposal_boxes': absolute_coarse_proposal_boxes,
+            'proposal_boxes_normalized': selected_anchors,
+        }
+        return coarse_prediction_dict
 
     def _image_batch_shape_2d(self, image_batch_shape_1d):
         """Takes a 1-D image batch shape tensor and converts it to a 2-D tensor.
@@ -695,3 +765,537 @@ class SSMMetaArch(model.DetectionModel):
             detections[
                 fields.DetectionResultFields.detection_masks] = nmsed_masks
         return detections
+
+    def _batch_decode_boxes(self, box_encodings, anchor_boxes):
+        """Decodes box encodings with respect to the anchor boxes.
+
+        Args:
+          box_encodings: a 4-D tensor with shape
+            [batch_size, num_anchors, num_classes, self._box_coder.code_size]
+            representing box encodings.
+          anchor_boxes: [batch_size, num_anchors, self._box_coder.code_size]
+            representing decoded bounding boxes. If using a shared box across
+            classes the shape will instead be
+            [total_num_proposals, 1, self._box_coder.code_size].
+
+        Returns:
+          decoded_boxes: a
+            [batch_size, num_anchors, num_classes, self._box_coder.code_size]
+            float tensor representing bounding box predictions (for each image in
+            batch, proposal and class). If using a shared box across classes the
+            shape will instead be
+            [batch_size, num_anchors, 1, self._box_coder.code_size].
+        """
+        combined_shape = shape_utils.combined_static_and_dynamic_shape(
+            box_encodings)
+        num_classes = combined_shape[2]
+        tiled_anchor_boxes = tf.tile(
+            tf.expand_dims(anchor_boxes, 2), [1, 1, num_classes, 1])
+        tiled_anchors_boxlist = box_list.BoxList(
+            tf.reshape(tiled_anchor_boxes, [-1, 4]))
+        decoded_boxes = self._box_coder.decode(
+            tf.reshape(box_encodings, [-1, self._box_coder.code_size]),
+            tiled_anchors_boxlist)
+        return tf.reshape(decoded_boxes.get(),
+                          tf.stack([combined_shape[0], combined_shape[1],
+                                    num_classes, 4]))
+
+    def _format_groundtruth_data(self, true_image_shapes):
+        """Helper function for preparing groundtruth data for target assignment.
+
+        In order to be consistent with the model.DetectionModel interface,
+        groundtruth boxes are specified in normalized coordinates and classes are
+        specified as label indices with no assumed background category.  To prepare
+        for target assignment, we:
+        1) convert boxes to absolute coordinates,
+        2) add a background class at class index 0
+        3) groundtruth instance masks, if available, are resized to match
+           image_shape.
+
+        Args:
+          true_image_shapes: int32 tensor of shape [batch, 3] where each row is
+            of the form [height, width, channels] indicating the shapes
+            of true images in the resized images, as resized images can be padded
+            with zeros.
+
+        Returns:
+          groundtruth_boxlists: A list of BoxLists containing (absolute) coordinates
+            of the groundtruth boxes.
+          groundtruth_classes_with_background_list: A list of 2-D one-hot
+            (or k-hot) tensors of shape [num_boxes, num_classes+1] containing the
+            class targets with the 0th index assumed to map to the background class.
+          groundtruth_masks_list: If present, a list of 3-D tf.float32 tensors of
+            shape [num_boxes, image_height, image_width] containing instance masks.
+            This is set to None if no masks exist in the provided groundtruth.
+        """
+        groundtruth_boxlists = [
+            box_list_ops.to_absolute_coordinates(
+                box_list.BoxList(boxes), true_image_shapes[i, 0],
+                true_image_shapes[i, 1])
+            for i, boxes in enumerate(
+                self.groundtruth_lists(fields.BoxListFields.boxes))
+        ]
+        groundtruth_classes_with_background_list = [
+            tf.to_float(
+                tf.pad(one_hot_encoding, [[0, 0], [1, 0]], mode='CONSTANT'))
+            for one_hot_encoding in self.groundtruth_lists(
+                fields.BoxListFields.classes)]
+
+        groundtruth_masks_list = self._groundtruth_lists.get(
+            fields.BoxListFields.masks)
+        # TODO(rathodv): Remove mask resizing once the legacy pipeline is deleted.
+        if groundtruth_masks_list is not None and self._resize_masks:
+            resized_masks_list = []
+            for mask in groundtruth_masks_list:
+                _, resized_mask, _ = self._image_resizer_fn(
+                    # Reuse the given `image_resizer_fn` to resize groundtruth masks.
+                    # `mask` tensor for an image is of the shape [num_masks,
+                    # image_height, image_width]. Below we create a dummy image of the
+                    # the shape [image_height, image_width, 1] to use with
+                    # `image_resizer_fn`.
+                    image=tf.zeros(tf.stack([tf.shape(mask)[1],
+                                             tf.shape(mask)[2], 1])),
+                    masks=mask)
+                resized_masks_list.append(resized_mask)
+
+            groundtruth_masks_list = resized_masks_list
+        if self.groundtruth_has_field(fields.BoxListFields.weights):
+            groundtruth_weights_list = self.groundtruth_lists(
+                fields.BoxListFields.weights)
+        else:
+            # Set weights for all batch elements equally to 1.0
+            groundtruth_weights_list = []
+            for groundtruth_classes in groundtruth_classes_with_background_list:
+                num_gt = tf.shape(groundtruth_classes)[0]
+                groundtruth_weights = tf.ones(num_gt)
+                groundtruth_weights_list.append(groundtruth_weights)
+
+        return (groundtruth_boxlists, groundtruth_classes_with_background_list,
+                groundtruth_masks_list, groundtruth_weights_list)
+
+    def loss(self, prediction_dict, true_image_shapes, scope=None):
+        """Compute scalar loss tensors given prediction tensors.
+
+        If number_of_stages=1, only RPN related losses are computed (i.e.,
+        `rpn_localization_loss` and `rpn_objectness_loss`).  Otherwise all
+        losses are computed.
+
+        Args:
+          prediction_dict: a dictionary holding prediction tensors (see the
+            documentation for the predict method.  If number_of_stages=1, we
+            expect prediction_dict to contain `rpn_box_encodings`,
+            `rpn_objectness_predictions_with_background`, `rpn_features_to_crop`,
+            `image_shape`, and `anchors` fields.  Otherwise we expect
+            prediction_dict to additionally contain `refined_box_encodings`,
+            `class_predictions_with_background`, `num_proposals`, and
+            `proposal_boxes` fields.
+          true_image_shapes: int32 tensor of shape [batch, 3] where each row is
+            of the form [height, width, channels] indicating the shapes
+            of true images in the resized images, as resized images can be padded
+            with zeros.
+          scope: Optional scope name.
+
+        Returns:
+          a dictionary mapping loss keys (`first_stage_localization_loss`,
+            `first_stage_objectness_loss`, 'second_stage_localization_loss',
+            'second_stage_classification_loss') to scalar tensors representing
+            corresponding loss values.
+        """
+        with tf.name_scope(scope, 'Loss', prediction_dict.values()):
+            (groundtruth_boxlists, groundtruth_classes_with_background_list,
+             groundtruth_masks_list, groundtruth_weights_list
+             ) = self._format_groundtruth_data(true_image_shapes)
+            prediction_dict_coarse = prediction_dict['coarse']
+            loss_dict = self._loss_box_classifier(
+                    prediction_dict_coarse['refined_box_encodings'],
+                    prediction_dict_coarse['class_predictions_with_background'],
+                    prediction_dict_coarse['proposal_boxes'],
+                    prediction_dict_coarse['num_proposals'],
+                    groundtruth_boxlists,
+                    groundtruth_classes_with_background_list,
+                    groundtruth_weights_list,
+                    prediction_dict['image_shape'],
+                    prediction_dict.get('mask_predictions'),
+                    groundtruth_masks_list
+                )
+            prediction_dict_fine = prediction_dict['fine']
+            loss_dict.update(self._loss_box_classifier(
+                    prediction_dict_fine['refined_box_encodings'],
+                    prediction_dict_fine['class_predictions_with_background'],
+                    prediction_dict_fine['proposal_boxes'],
+                    prediction_dict_fine['num_proposals'],
+                    groundtruth_boxlists,
+                    groundtruth_classes_with_background_list,
+                    groundtruth_weights_list,
+                    prediction_dict['image_shape'],
+                    prediction_dict.get('mask_predictions'),
+                    groundtruth_masks_list
+                ))
+        return loss_dict
+
+    def _loss_box_classifier(self,
+                             refined_box_encodings,
+                             class_predictions_with_background,
+                             proposal_boxes,
+                             num_proposals,
+                             groundtruth_boxlists,
+                             groundtruth_classes_with_background_list,
+                             groundtruth_weights_list,
+                             image_shape,
+                             prediction_masks=None,
+                             groundtruth_masks_list=None):
+        """Computes scalar box classifier loss tensors.
+
+        Uses self._detector_target_assigner to obtain regression and classification
+        targets for the second stage box classifier, optionally performs
+        hard mining, and returns losses.  All losses are computed independently
+        for each image and then averaged across the batch.
+        Please note that for boxes and masks with multiple labels, the box
+        regression and mask prediction losses are only computed for one label.
+
+        This function assumes that the proposal boxes in the "padded" regions are
+        actually zero (and thus should not be matched to).
+
+
+        Args:
+          refined_box_encodings: a 3-D tensor with shape
+            [total_num_proposals, num_classes, box_coder.code_size] representing
+            predicted (final) refined box encodings. If using a shared box across
+            classes this will instead have shape
+            [total_num_proposals, 1, box_coder.code_size].
+          class_predictions_with_background: a 2-D tensor with shape
+            [total_num_proposals, num_classes + 1] containing class
+            predictions (logits) for each of the anchors.  Note that this tensor
+            *includes* background class predictions (at class index 0).
+          proposal_boxes: [batch_size, self.max_num_proposals, 4] representing
+            decoded proposal bounding boxes.
+          num_proposals: A Tensor of type `int32`. A 1-D tensor of shape [batch]
+            representing the number of proposals predicted for each image in
+            the batch.
+          groundtruth_boxlists: a list of BoxLists containing coordinates of the
+            groundtruth boxes.
+          groundtruth_classes_with_background_list: a list of 2-D one-hot
+            (or k-hot) tensors of shape [num_boxes, num_classes + 1] containing the
+            class targets with the 0th index assumed to map to the background class.
+          groundtruth_weights_list: A list of 1-D tf.float32 tensors of shape
+            [num_boxes] containing weights for groundtruth boxes.
+          image_shape: a 1-D tensor of shape [4] representing the image shape.
+          prediction_masks: an optional 4-D tensor with shape [total_num_proposals,
+            num_classes, mask_height, mask_width] containing the instance masks for
+            each box.
+          groundtruth_masks_list: an optional list of 3-D tensors of shape
+            [num_boxes, image_height, image_width] containing the instance masks for
+            each of the boxes.
+
+        Returns:
+          a dictionary mapping loss keys ('second_stage_localization_loss',
+            'second_stage_classification_loss') to scalar tensors representing
+            corresponding loss values.
+
+        Raises:
+          ValueError: if `predict_instance_masks` in
+            second_stage_mask_rcnn_box_predictor is True and
+            `groundtruth_masks_list` is not provided.
+        """
+        with tf.name_scope('BoxClassifierLoss'):
+            paddings_indicator = self._padded_batched_proposals_indicator(
+                num_proposals, self.max_num_proposals)
+            proposal_boxlists = [
+                box_list.BoxList(proposal_boxes_single_image)
+                for proposal_boxes_single_image in tf.unstack(proposal_boxes)]
+            batch_size = len(proposal_boxlists)
+
+            num_proposals_or_one = tf.to_float(tf.expand_dims(
+                tf.maximum(num_proposals, tf.ones_like(num_proposals)), 1))
+            normalizer = tf.tile(num_proposals_or_one,
+                                 [1, self.max_num_proposals]) * batch_size
+
+            (batch_cls_targets_with_background, batch_cls_weights,
+             batch_reg_targets,
+             batch_reg_weights, _) = target_assigner.batch_assign_targets(
+                target_assigner=self._detector_target_assigner,
+                anchors_batch=proposal_boxlists,
+                gt_box_batch=groundtruth_boxlists,
+                gt_class_targets_batch=groundtruth_classes_with_background_list,
+                unmatched_class_label=tf.constant(
+                    [1] + self._num_classes * [0], dtype=tf.float32),
+                gt_weights_batch=groundtruth_weights_list)
+
+            class_predictions_with_background = tf.reshape(
+                class_predictions_with_background,
+                [batch_size, self.max_num_proposals, -1])
+
+            flat_cls_targets_with_background = tf.reshape(
+                batch_cls_targets_with_background,
+                [batch_size * self.max_num_proposals, -1])
+            one_hot_flat_cls_targets_with_background = tf.argmax(
+                flat_cls_targets_with_background, axis=1)
+            one_hot_flat_cls_targets_with_background = tf.one_hot(
+                one_hot_flat_cls_targets_with_background,
+                flat_cls_targets_with_background.get_shape()[1])
+
+            # If using a shared box across classes use directly
+            if refined_box_encodings.shape[1] == 1:
+                reshaped_refined_box_encodings = tf.reshape(
+                    refined_box_encodings,
+                    [batch_size, self.max_num_proposals,
+                     self._box_coder.code_size])
+            # For anchors with multiple labels, picks refined_location_encodings
+            # for just one class to avoid over-counting for regression loss and
+            # (optionally) mask loss.
+            else:
+                reshaped_refined_box_encodings = (
+                    self._get_refined_encodings_for_postitive_class(
+                        refined_box_encodings,
+                        one_hot_flat_cls_targets_with_background, batch_size))
+
+            losses_mask = None
+            if self.groundtruth_has_field(fields.InputDataFields.is_annotated):
+                losses_mask = tf.stack(self.groundtruth_lists(
+                    fields.InputDataFields.is_annotated))
+            second_stage_loc_losses = self._second_stage_localization_loss(
+                reshaped_refined_box_encodings,
+                batch_reg_targets,
+                weights=batch_reg_weights,
+                losses_mask=losses_mask) / normalizer
+            second_stage_cls_losses = ops.reduce_sum_trailing_dimensions(
+                self._second_stage_classification_loss(
+                    class_predictions_with_background,
+                    batch_cls_targets_with_background,
+                    weights=batch_cls_weights,
+                    losses_mask=losses_mask),
+                ndims=2) / normalizer
+
+            second_stage_loc_loss = tf.reduce_sum(
+                second_stage_loc_losses * tf.to_float(paddings_indicator))
+            second_stage_cls_loss = tf.reduce_sum(
+                second_stage_cls_losses * tf.to_float(paddings_indicator))
+
+            if self._hard_example_miner:
+                (second_stage_loc_loss, second_stage_cls_loss
+                 ) = self._unpad_proposals_and_apply_hard_mining(
+                    proposal_boxlists, second_stage_loc_losses,
+                    second_stage_cls_losses, num_proposals)
+            localization_loss = tf.multiply(self._second_stage_loc_loss_weight,
+                                            second_stage_loc_loss,
+                                            name='localization_loss')
+
+            classification_loss = tf.multiply(
+                self._second_stage_cls_loss_weight,
+                second_stage_cls_loss,
+                name='classification_loss')
+
+            loss_dict = {localization_loss.op.name: localization_loss,
+                         classification_loss.op.name: classification_loss}
+            second_stage_mask_loss = None
+            if prediction_masks is not None:
+                if groundtruth_masks_list is None:
+                    raise ValueError('Groundtruth instance masks not provided. '
+                                     'Please configure input reader.')
+
+                unmatched_mask_label = tf.zeros(image_shape[1:3],
+                                                dtype=tf.float32)
+                (batch_mask_targets, _, _, batch_mask_target_weights,
+                 _) = target_assigner.batch_assign_targets(
+                    target_assigner=self._detector_target_assigner,
+                    anchors_batch=proposal_boxlists,
+                    gt_box_batch=groundtruth_boxlists,
+                    gt_class_targets_batch=groundtruth_masks_list,
+                    unmatched_class_label=unmatched_mask_label,
+                    gt_weights_batch=groundtruth_weights_list)
+
+                # Pad the prediction_masks with to add zeros for background class to be
+                # consistent with class predictions.
+                if prediction_masks.get_shape().as_list()[1] == 1:
+                    # Class agnostic masks or masks for one-class prediction. Logic for
+                    # both cases is the same since background predictions are ignored
+                    # through the batch_mask_target_weights.
+                    prediction_masks_masked_by_class_targets = prediction_masks
+                else:
+                    prediction_masks_with_background = tf.pad(
+                        prediction_masks, [[0, 0], [1, 0], [0, 0], [0, 0]])
+                    prediction_masks_masked_by_class_targets = tf.boolean_mask(
+                        prediction_masks_with_background,
+                        tf.greater(one_hot_flat_cls_targets_with_background, 0))
+
+                mask_height = prediction_masks.shape[2].value
+                mask_width = prediction_masks.shape[3].value
+                reshaped_prediction_masks = tf.reshape(
+                    prediction_masks_masked_by_class_targets,
+                    [batch_size, -1, mask_height * mask_width])
+
+                batch_mask_targets_shape = tf.shape(batch_mask_targets)
+                flat_gt_masks = tf.reshape(batch_mask_targets,
+                                           [-1, batch_mask_targets_shape[2],
+                                            batch_mask_targets_shape[3]])
+
+                # Use normalized proposals to crop mask targets from image masks.
+                flat_normalized_proposals = box_list_ops.to_normalized_coordinates(
+                    box_list.BoxList(tf.reshape(proposal_boxes, [-1, 4])),
+                    image_shape[1], image_shape[2]).get()
+
+                flat_cropped_gt_mask = self._crop_and_resize_fn(
+                    tf.expand_dims(flat_gt_masks, -1),
+                    tf.expand_dims(flat_normalized_proposals, axis=1),
+                    [mask_height, mask_width])
+
+                batch_cropped_gt_mask = tf.reshape(
+                    flat_cropped_gt_mask,
+                    [batch_size, -1, mask_height * mask_width])
+
+                second_stage_mask_losses = ops.reduce_sum_trailing_dimensions(
+                    self._second_stage_mask_loss(
+                        reshaped_prediction_masks,
+                        batch_cropped_gt_mask,
+                        weights=batch_mask_target_weights,
+                        losses_mask=losses_mask),
+                    ndims=2) / (
+                                                   mask_height * mask_width * tf.maximum(
+                                               tf.reduce_sum(
+                                                   batch_mask_target_weights,
+                                                   axis=1, keep_dims=True
+                                               ), tf.ones((batch_size, 1))))
+                second_stage_mask_loss = tf.reduce_sum(
+                    tf.where(paddings_indicator, second_stage_mask_losses,
+                             tf.zeros_like(second_stage_mask_losses)))
+
+            if second_stage_mask_loss is not None:
+                mask_loss = tf.multiply(self._second_stage_mask_loss_weight,
+                                        second_stage_mask_loss,
+                                        name='mask_loss')
+                loss_dict[mask_loss.op.name] = mask_loss
+        return loss_dict
+
+    def _get_refined_encodings_for_postitive_class(
+            self, refined_box_encodings, flat_cls_targets_with_background,
+            batch_size):
+        # We only predict refined location encodings for the non background
+        # classes, but we now pad it to make it compatible with the class
+        # predictions
+        refined_box_encodings_with_background = tf.pad(refined_box_encodings,
+                                                       [[0, 0], [1, 0], [0, 0]])
+        refined_box_encodings_masked_by_class_targets = (
+            box_list_ops.boolean_mask(
+                box_list.BoxList(
+                    tf.reshape(refined_box_encodings_with_background,
+                               [-1, self._box_coder.code_size])),
+                tf.reshape(tf.greater(flat_cls_targets_with_background, 0),
+                           [-1]),
+                use_static_shapes=self._use_static_shapes,
+                indicator_sum=batch_size * self.max_num_proposals
+                if self._use_static_shapes else None).get())
+        return tf.reshape(
+            refined_box_encodings_masked_by_class_targets, [
+                batch_size, self.max_num_proposals,
+                self._box_coder.code_size
+            ])
+
+    def _padded_batched_proposals_indicator(self,
+                                            num_proposals,
+                                            max_num_proposals):
+        """Creates indicator matrix of non-pad elements of padded batch proposals.
+
+        Args:
+          num_proposals: Tensor of type tf.int32 with shape [batch_size].
+          max_num_proposals: Maximum number of proposals per image (integer).
+
+        Returns:
+          A Tensor of type tf.bool with shape [batch_size, max_num_proposals].
+        """
+        batch_size = tf.size(num_proposals)
+        tiled_num_proposals = tf.tile(
+            tf.expand_dims(num_proposals, 1), [1, max_num_proposals])
+        tiled_proposal_index = tf.tile(
+            tf.expand_dims(tf.range(max_num_proposals), 0), [batch_size, 1])
+        return tf.greater(tiled_num_proposals, tiled_proposal_index)
+
+    def _unpad_proposals_and_apply_hard_mining(self,
+                                               proposal_boxlists,
+                                               second_stage_loc_losses,
+                                               second_stage_cls_losses,
+                                               num_proposals):
+        """Unpads proposals and applies hard mining.
+
+        Args:
+          proposal_boxlists: A list of `batch_size` BoxLists each representing
+            `self.max_num_proposals` representing decoded proposal bounding boxes
+            for each image.
+          second_stage_loc_losses: A Tensor of type `float32`. A tensor of shape
+            `[batch_size, self.max_num_proposals]` representing per-anchor
+            second stage localization loss values.
+          second_stage_cls_losses: A Tensor of type `float32`. A tensor of shape
+            `[batch_size, self.max_num_proposals]` representing per-anchor
+            second stage classification loss values.
+          num_proposals: A Tensor of type `int32`. A 1-D tensor of shape [batch]
+            representing the number of proposals predicted for each image in
+            the batch.
+
+        Returns:
+          second_stage_loc_loss: A scalar float32 tensor representing the second
+            stage localization loss.
+          second_stage_cls_loss: A scalar float32 tensor representing the second
+            stage classification loss.
+        """
+        for (proposal_boxlist, single_image_loc_loss, single_image_cls_loss,
+             single_image_num_proposals) in zip(
+            proposal_boxlists,
+            tf.unstack(second_stage_loc_losses),
+            tf.unstack(second_stage_cls_losses),
+            tf.unstack(num_proposals)):
+            proposal_boxlist = box_list.BoxList(
+                tf.slice(proposal_boxlist.get(),
+                         [0, 0], [single_image_num_proposals, -1]))
+            single_image_loc_loss = tf.slice(single_image_loc_loss,
+                                             [0], [single_image_num_proposals])
+            single_image_cls_loss = tf.slice(single_image_cls_loss,
+                                             [0], [single_image_num_proposals])
+            return self._hard_example_miner(
+                location_losses=tf.expand_dims(single_image_loc_loss, 0),
+                cls_losses=tf.expand_dims(single_image_cls_loss, 0),
+                decoded_boxlist_list=[proposal_boxlist])
+
+    def restore_map(self,
+                    fine_tune_checkpoint_type='detection',
+                    load_all_detection_checkpoint_vars=False):
+        """Returns a map of variables to load from a foreign checkpoint.
+
+        See parent class for details.
+
+        Args:
+          fine_tune_checkpoint_type: whether to restore from a full detection
+            checkpoint (with compatible variable names) or to restore from a
+            classification checkpoint for initialization prior to training.
+            Valid values: `detection`, `classification`. Default 'detection'.
+           load_all_detection_checkpoint_vars: whether to load all variables (when
+             `fine_tune_checkpoint_type` is `detection`). If False, only variables
+             within the feature extractor scopes are included. Default False.
+
+        Returns:
+          A dict mapping variable names (to load from a checkpoint) to variables in
+          the model graph.
+        Raises:
+          ValueError: if fine_tune_checkpoint_type is neither `classification`
+            nor `detection`.
+        """
+        if fine_tune_checkpoint_type not in ['detection', 'classification']:
+            raise ValueError(
+                'Not supported fine_tune_checkpoint_type: {}'.format(
+                    fine_tune_checkpoint_type))
+        if fine_tune_checkpoint_type == 'classification':
+            return self._feature_extractor.restore_from_classification_checkpoint_fn(
+                self.first_stage_feature_extractor_scope,
+                self.second_stage_feature_extractor_scope)
+
+        variables_to_restore = tf.global_variables()
+        variables_to_restore.append(slim.get_or_create_global_step())
+        # Only load feature extractor variables to be consistent with loading from
+        # a classification checkpoint.
+        include_patterns = None
+        if not load_all_detection_checkpoint_vars:
+            include_patterns = [
+                self.first_stage_feature_extractor_scope,
+                self.second_stage_feature_extractor_scope
+            ]
+        feature_extractor_variables = tf.contrib.framework.filter_variables(
+            variables_to_restore, include_patterns=include_patterns)
+        return {var.op.name: var for var in feature_extractor_variables}
