@@ -99,7 +99,7 @@ class SSMMetaArch(model.DetectionModel):
                  is_training,
                  num_classes,
                  image_resizer_fn,
-                 features_extractor,
+                 feature_extractor,
                  depthwise_separable_layer_scope_fn,
                  semantic_attention_layer_scope_fn,
                  attention_combiner_scope_fn,
@@ -145,7 +145,7 @@ class SSMMetaArch(model.DetectionModel):
         grid_anchor_generator.GridAnchorGenerator objects)
         #TODO : Add documentation of other arguments
         """
-        super(FasterRCNNMetaArch, self).__init__(num_classes=num_classes)
+        super(SSMMetaArch, self).__init__(num_classes=num_classes)
         if not isinstance(anchor_generator,
                           grid_anchor_generator.GridAnchorGenerator):
             raise ValueError('anchor_generator must be of type '
@@ -344,7 +344,7 @@ class SSMMetaArch(model.DetectionModel):
                                                 axis=3)
         pedestrian_reducer_feature_output = self.build_attention_reducer_layer(
             pedestrian_selector_feature,
-            is_training)
+            self._is_training)
         # Reduce the output to one feature map with one channel.
         class_selection_feature_map = tf.layers.conv2d(
             pedestrian_reducer_feature_output,
@@ -390,32 +390,31 @@ class SSMMetaArch(model.DetectionModel):
             prediction_stage=2
         )
 
-    refined_coarse_box_encodings = tf.squeeze(
-        coarse_box_predictions[box_predictor.BOX_ENCODINGS],
-        axis=1, name='all_refined_box_encodings')
-    coarse_class_predictions_with_background = tf.squeeze(
-        coarse_box_predictions[box_predictor.CLASS_PREDICTIONS_WITH_BACKGROUND],
-        axis=1, name='all_class_predictions_with_background')
+        refined_coarse_box_encodings = tf.squeeze(
+            coarse_box_predictions[box_predictor.BOX_ENCODINGS],
+            axis=1, name='all_refined_box_encodings')
+        coarse_class_predictions_with_background = tf.squeeze(
+            coarse_box_predictions[box_predictor.CLASS_PREDICTIONS_WITH_BACKGROUND],
+            axis=1, name='all_class_predictions_with_background')
 
-    absolute_coarse_proposal_boxes = ops.normalized_to_image_coordinates(
-        selected_anchors_minibatch, image_shape, self._parallel_iterations)
+        absolute_coarse_proposal_boxes = ops.normalized_to_image_coordinates(
+            selected_anchors_minibatch, image_shape, self._parallel_iterations)
 
-    coarse_prediction_dict = {
-        'refined_box_encodings': refined_coarse_box_encodings,
-        'class_predictions_with_background':
-            coarse_class_predictions_with_background,
-        'num_proposals': anchor_count,
-        'proposal_boxes': absolute_coarse_proposal_boxes,
-        'box_classifier_features': box_classifier_features,
-        'proposal_boxes_normalized': selected_anchors_minibatch,
-    }
+        coarse_prediction_dict = {
+            'refined_box_encodings': refined_coarse_box_encodings,
+            'class_predictions_with_background':
+                coarse_class_predictions_with_background,
+            'num_proposals': anchor_count,
+            'proposal_boxes': absolute_coarse_proposal_boxes,
+            'proposal_boxes_normalized': selected_anchors_minibatch,
+        }
 
-    coarse_detection_dict = self._postprocess_box_classifier(coarse_prediction_dict['refined_box_encodings'],
-                                                             coarse_prediction_dict['class_predictions_with_background'],
-                                                             coarse_prediction_dict['proposal_boxes'],
-                                                             coarse_prediction_dict['num_proposals'],
-                                                             true_image_shapes
-                                                             )
+        coarse_detection_dict = self._postprocess_box_classifier(coarse_prediction_dict['refined_box_encodings'],
+                                                                 coarse_prediction_dict['class_predictions_with_background'],
+                                                                 coarse_prediction_dict['proposal_boxes'],
+                                                                 coarse_prediction_dict['num_proposals'],
+                                                                 true_image_shapes
+                                                                 )
 
 
 
@@ -472,7 +471,7 @@ class SSMMetaArch(model.DetectionModel):
                                   lambda: self._max_anchors)
             batched_selected_anchors = box_list_ops.pad_or_clip_box_list(
                 selected_anchors,
-                num_boxes, self._max_anchors).get()
+                num_anchors, self._max_anchors).get()
             return batched_selected_anchors, num_anchors
 
         anchors = tf.tile(tf.expand_dims(anchors.get(), axis=0),
@@ -532,7 +531,7 @@ class SSMMetaArch(model.DetectionModel):
             )
         return depthwise_feature_out
 
-    def build_deformable_conv_layer(self, depthwise_feature_ouutput,
+    def build_deformable_conv_layer(self, depthwise_feature_output,
                                     is_training):
         offset = tl.layers.Conv2d(depthwise_feature_output, 18, (3, 3), (1, 1),
                                   act=None,
@@ -677,22 +676,22 @@ class SSMMetaArch(model.DetectionModel):
                 mask_predictions, [-1, self.max_num_proposals,
                                    self.num_classes, mask_height, mask_width])
 
-            (nmsed_boxes, nmsed_scores, nmsed_classes, nmsed_masks, _,
-             num_detections) = self._second_stage_nms_fn(
-                refined_decoded_boxes_batch,
-                class_predictions_batch,
-                clip_window=clip_window,
-                change_coordinate_frame=True,
-                num_valid_boxes=num_proposals,
-                masks=mask_predictions_batch)
-            detections = {
-                fields.DetectionResultFields.detection_boxes: nmsed_boxes,
-                fields.DetectionResultFields.detection_scores: nmsed_scores,
-                fields.DetectionResultFields.detection_classes: nmsed_classes,
-                fields.DetectionResultFields.num_detections: tf.to_float(
-                    num_detections)
-            }
-            if nmsed_masks is not None:
-                detections[
-                    fields.DetectionResultFields.detection_masks] = nmsed_masks
+        (nmsed_boxes, nmsed_scores, nmsed_classes, nmsed_masks, _,
+         num_detections) = self._second_stage_nms_fn(
+            refined_decoded_boxes_batch,
+            class_predictions_batch,
+            clip_window=clip_window,
+            change_coordinate_frame=True,
+            num_valid_boxes=num_proposals,
+            masks=mask_predictions_batch)
+        detections = {
+            fields.DetectionResultFields.detection_boxes: nmsed_boxes,
+            fields.DetectionResultFields.detection_scores: nmsed_scores,
+            fields.DetectionResultFields.detection_classes: nmsed_classes,
+            fields.DetectionResultFields.num_detections: tf.to_float(
+                num_detections)
+        }
+        if nmsed_masks is not None:
+            detections[
+                fields.DetectionResultFields.detection_masks] = nmsed_masks
         return detections
