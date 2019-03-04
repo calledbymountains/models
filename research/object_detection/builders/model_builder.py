@@ -537,6 +537,8 @@ def _build_ssm_model(ssm_config, is_training, add_summaries):
         ssm_config.feature_extractor, is_training,
         ssm_config.inplace_batchnorm_update)
 
+    print(feature_extractor)
+
     # TODO(bhattad): When eval is supported using static shapes, add separate
     # use_static_shapes_for_trainig and use_static_shapes_for_evaluation.
     max_anchors = ssm_config.max_anchors
@@ -604,7 +606,7 @@ def _build_ssm_model(ssm_config, is_training, add_summaries):
     #     ssm_config.fine_stage_mask_prediction_loss_weight)
 
     crop_and_resize_fn = (
-        ops.matmul_crop_and_resize)
+        ops.native_crop_and_resize)
 
     common_kwargs = dict(
         is_training=is_training,

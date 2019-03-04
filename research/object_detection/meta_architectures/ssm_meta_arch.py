@@ -184,7 +184,8 @@ class SSMMetaArch(model.DetectionModel):
         self._fine_stage_target_assigner = fine_stage_target_assigner
         self._coarse_stage_cls_loss = coarse_stage_cls_loss
         self._fine_stage_cls_loss = fine_stage_cls_loss
-
+        self._image_shape = None
+        self._box_coder = self._coarse_stage_target_assigner.box_coder
 
 
 
@@ -335,6 +336,7 @@ class SSMMetaArch(model.DetectionModel):
         ValueError: If `predict` is called before `preprocess`.
         """
         image_shape = tf.shape(preprocessed_inputs)
+        self._image_shape = image_shape
         feature_extractor_output_map = self._feature_extractor.extract_input_features(
             preprocessed_inputs,
             scope=self.feature_extractor_scope
@@ -371,8 +373,8 @@ class SSMMetaArch(model.DetectionModel):
         )
 
         # valid_pedestrian_locations is of shape [batchsize, height, width, 1]
-        valid_locations = tf.where(tf.greater_equal(class_selection_feature_map,
-                                                    self._selection_threshold))
+        valid_locations = tf.greater_equal(class_selection_feature_map,
+                                                    self._selection_threshold)
         self._num_anchors_per_location = self._anchor_generator.num_anchors_per_location()
         if len(self._num_anchors_per_location) != 1:
             raise RuntimeError(
@@ -384,11 +386,11 @@ class SSMMetaArch(model.DetectionModel):
         # Anchors are designed as a list of length one with a BoxList.
         anchors = anchors[0]
         # We make sure that we clip all the anchors to the image size.
-        anchors = box_list_ops.clip_to_window(anchors, window=[0, 0,
-                                                               image_shape[
-                                                                   1],
-                                                               image_shape[
-                                                                   2]])
+        anchors = box_list_ops.clip_to_window(anchors, window=[0.0, 0.0,
+                                                               tf.cast(image_shape[
+                                                                   1], tf.float32),
+                                                               tf.cast(image_shape[
+                                                                   2], tf.float32)])
         # selected_anchors_minibatch [batchsize, max_anchors, 4]
         # anchor_count [batchsize]
         selected_anchors_minibatch, anchor_count = self.select_anchor_locations_over_batch(
@@ -409,6 +411,8 @@ class SSMMetaArch(model.DetectionModel):
         #     )
 
         refined_box_encodings = coarse_prediction_dict['refined_box_encodings']
+        refined_box_encodings = tf.reshape(refined_box_encodings,
+                                           [self._image_shape[0], self._max_anchors, self.num_classes, 4])
         refined_box_encodings = self._batch_decode_boxes(refined_box_encodings,
                                                          selected_anchors_minibatch)
 
@@ -454,6 +458,7 @@ class SSMMetaArch(model.DetectionModel):
         Returns:
         A float32 tensor with shape [K, new_height, new_width, depth].
         """
+        print(features_to_crop)
         cropped_regions = self._flatten_first_two_dimensions(
             self._crop_and_resize_fn(
                 features_to_crop, proposal_boxes_normalized,
@@ -461,19 +466,21 @@ class SSMMetaArch(model.DetectionModel):
         return slim.max_pool2d(
             cropped_regions,
             [self._maxpool_kernel_size, self._maxpool_kernel_size],
-            stride=self._maxpool_stride)
+            stride=2* self._maxpool_kernel_stride)
 
     def select_anchor_locations_over_batch(self, valid_locations, anchors):
         """Selects the anchor center locations."""
 
         def select_anchor_locations_in_one_batch(args):
             valid_location = args[0]  # [height, width, 1]
-            anchor_collection = tf.squeeze(args[1], axis=0)
+            anchor_collection = args[1]
+            print(anchor_collection)
             anchor_collection = box_list.BoxList(anchor_collection)
             valid_location = tf.reshape(valid_location, [-1, 1])
             valid_location = tf.tile(valid_location,
-                                     [1, self._num_anchors_per_location])
+                                     [1, self._num_anchors_per_location[0]])
             valid_location = tf.reshape(valid_location, [-1])
+            print(valid_location)
             selected_anchors = box_list_ops.boolean_mask(anchor_collection,
                                                          valid_location)
             # We normalize the selected_anchors
@@ -482,16 +489,19 @@ class SSMMetaArch(model.DetectionModel):
                 height=self._image_shape[1],
                 width=self._image_shape[2])
             num_anchors = selected_anchors.num_boxes()
+            '''
             num_anchors = tf.cond(tf.less_equal(num_anchors, self._max_anchors),
                                   lambda: num_anchors,
                                   lambda: self._max_anchors)
+            '''
             batched_selected_anchors = box_list_ops.pad_or_clip_box_list(
                 selected_anchors,
-                num_anchors, self._max_anchors).get()
+                self._max_anchors).get()
             return batched_selected_anchors, num_anchors
 
+
         anchors = tf.tile(tf.expand_dims(anchors.get(), axis=0),
-                          [self._num_anchors_per_location, 1, 1])
+                          [tf.shape(valid_locations)[0], 1, 1])
         selected_anchors_minibatch = tf.map_fn(
             select_anchor_locations_in_one_batch,
             (valid_locations, anchors),
@@ -531,7 +541,7 @@ class SSMMetaArch(model.DetectionModel):
                 coarse_class_predictions_with_background,
             'num_proposals': num_anchors,
             'proposal_boxes': absolute_coarse_proposal_boxes,
-            'proposal_boxes_normalized': selected_anchors,
+            'proposal_boxes_normalized': selected_anchors
         }
         return coarse_prediction_dict
 
@@ -547,7 +557,7 @@ class SSMMetaArch(model.DetectionModel):
 
             [coarse_input_feature_maps],
             num_predictions_per_location=[1],
-            scope=self.first_stage_box_predictor_scope,
+            scope=self.second_stage_box_predictor_scope,
             prediction_stage=2
         )
 
@@ -809,6 +819,8 @@ class SSMMetaArch(model.DetectionModel):
             tf.expand_dims(anchor_boxes, 2), [1, 1, num_classes, 1])
         tiled_anchors_boxlist = box_list.BoxList(
             tf.reshape(tiled_anchor_boxes, [-1, 4]))
+        print(box_encodings)
+        print(tiled_anchors_boxlist.get())
         decoded_boxes = self._box_coder.decode(
             tf.reshape(box_encodings, [-1, self._box_coder.code_size]),
             tiled_anchors_boxlist)
@@ -931,7 +943,8 @@ class SSMMetaArch(model.DetectionModel):
                     groundtruth_boxlists,
                     groundtruth_classes_with_background_list,
                     groundtruth_weights_list,
-                    prediction_dict['image_shape'],
+                    self._image_shape,
+                    self._coarse_stage_target_assigner,
                     prediction_dict.get('mask_predictions'),
                     groundtruth_masks_list
                 )
@@ -945,7 +958,8 @@ class SSMMetaArch(model.DetectionModel):
                     groundtruth_boxlists,
                     groundtruth_classes_with_background_list,
                     groundtruth_weights_list,
-                    prediction_dict['image_shape'],
+                    self._image_shape,
+                    self._fine_stage_target_assigner,
                     prediction_dict.get('mask_predictions'),
                     groundtruth_masks_list
                 ))
@@ -1019,7 +1033,7 @@ class SSMMetaArch(model.DetectionModel):
         """
         with tf.name_scope('BoxClassifierLoss'):
             paddings_indicator = self._padded_batched_proposals_indicator(
-                num_proposals, self.max_anchors)
+                num_proposals, self._max_anchors)
             proposal_boxlists = [
                 box_list.BoxList(proposal_boxes_single_image)
                 for proposal_boxes_single_image in tf.unstack(proposal_boxes)]
@@ -1028,8 +1042,9 @@ class SSMMetaArch(model.DetectionModel):
             num_proposals_or_one = tf.to_float(tf.expand_dims(
                 tf.maximum(num_proposals, tf.ones_like(num_proposals)), 1))
             normalizer = tf.tile(num_proposals_or_one,
-                                 [1, self.max_num_proposals]) * batch_size
+                                 [1, self._max_anchors]) * batch_size
 
+            print(detector_target_assigner)
             (batch_cls_targets_with_background, batch_cls_weights,
              batch_reg_targets,
              batch_reg_weights, _) = target_assigner.batch_assign_targets(
@@ -1043,13 +1058,14 @@ class SSMMetaArch(model.DetectionModel):
 
             class_predictions_with_background = tf.reshape(
                 class_predictions_with_background,
-                [batch_size, self.max_num_proposals, -1])
+                [batch_size, self._max_anchors, -1])
 
             flat_cls_targets_with_background = tf.reshape(
                 batch_cls_targets_with_background,
-                [batch_size * self.max_num_proposals, -1])
+                [batch_size * self._max_anchors, -1])
             one_hot_flat_cls_targets_with_background = tf.argmax(
                 flat_cls_targets_with_background, axis=1)
+            print(one_hot_flat_cls_targets_with_background)
             one_hot_flat_cls_targets_with_background = tf.one_hot(
                 one_hot_flat_cls_targets_with_background,
                 flat_cls_targets_with_background.get_shape()[1])
@@ -1058,7 +1074,7 @@ class SSMMetaArch(model.DetectionModel):
             if refined_box_encodings.shape[1] == 1:
                 reshaped_refined_box_encodings = tf.reshape(
                     refined_box_encodings,
-                    [batch_size, self.max_anchors,
+                    [batch_size, self._max_anchors,
                      self._box_coder.code_size])
             # For anchors with multiple labels, picks refined_location_encodings
             # for just one class to avoid over-counting for regression loss and
@@ -1303,8 +1319,7 @@ class SSMMetaArch(model.DetectionModel):
                     fine_tune_checkpoint_type))
         if fine_tune_checkpoint_type == 'classification':
             return self._feature_extractor.restore_from_classification_checkpoint_fn(
-                self.first_stage_feature_extractor_scope,
-                self.second_stage_feature_extractor_scope)
+                self.feature_extractor_scope)
 
         variables_to_restore = tf.global_variables()
         variables_to_restore.append(slim.get_or_create_global_step())
@@ -1313,8 +1328,8 @@ class SSMMetaArch(model.DetectionModel):
         include_patterns = None
         if not load_all_detection_checkpoint_vars:
             include_patterns = [
-                self.first_stage_feature_extractor_scope,
-                self.second_stage_feature_extractor_scope
+                self.feature_extractor_scope
+
             ]
         feature_extractor_variables = tf.contrib.framework.filter_variables(
             variables_to_restore, include_patterns=include_patterns)
