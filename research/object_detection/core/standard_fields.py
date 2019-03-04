@@ -56,6 +56,7 @@ class InputDataFields(object):
     proposal_boxes: coordinates of object proposal boxes.
     proposal_objectness: objectness score of each proposal.
     groundtruth_instance_masks: ground truth instance masks.
+    groundtruth_pseudo_mask: ground truth pseudo segmentation mask.
     groundtruth_instance_boundaries: ground truth instance boundaries.
     groundtruth_instance_classes: instance mask-level class labels.
     groundtruth_keypoints: ground truth keypoints.
@@ -88,6 +89,7 @@ class InputDataFields(object):
   proposal_boxes = 'proposal_boxes'
   proposal_objectness = 'proposal_objectness'
   groundtruth_instance_masks = 'groundtruth_instance_masks'
+  groundtruth_pseudo_mask = 'groundtruth_pseudo_mask'
   groundtruth_instance_boundaries = 'groundtruth_instance_boundaries'
   groundtruth_instance_classes = 'groundtruth_instance_classes'
   groundtruth_keypoints = 'groundtruth_keypoints'
@@ -187,6 +189,7 @@ class TfExampleFields(object):
     object_segment_area: the area of the segment.
     object_weight: a weight factor for the object's bounding box.
     instance_masks: instance segmentation masks.
+    psudo_masks: Pseudo segmentation mask. (one per image).
     instance_boundaries: instance boundaries.
     instance_classes: Classes for each instance segmentation mask.
     detection_class_label: class label in numbers.
@@ -222,6 +225,7 @@ class TfExampleFields(object):
   object_segment_area = 'image/object/segment/area'
   object_weight = 'image/object/weight'
   instance_masks = 'image/segmentation/object'
+  psudo_masks = 'image/pseudo/mask'
   instance_boundaries = 'image/boundaries/object'
   instance_classes = 'image/segmentation/object/class'
   detection_class_label = 'image/detection/label'
