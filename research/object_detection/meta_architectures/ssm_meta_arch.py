@@ -179,13 +179,18 @@ class SSMMetaArch(model.DetectionModel):
         self._parallel_iterations = parallel_iterations
         self._num_anchors_per_location = None
         self._fine_stage_nms_fn = fine_stage_nms_fn
-        self._fine_stage_box_score_conversion_fn = fine_stage_box_score_conversion_fn,
+        self._fine_stage_box_score_conversion_fn = fine_stage_box_score_conversion_fn
         self._coarse_stage_target_assigner = coarse_stage_target_assigner
         self._fine_stage_target_assigner = fine_stage_target_assigner
         self._coarse_stage_cls_loss = coarse_stage_cls_loss
         self._fine_stage_cls_loss = fine_stage_cls_loss
         self._image_shape = None
         self._box_coder = self._coarse_stage_target_assigner.box_coder
+        self._second_stage_localization_loss = (
+            losses.WeightedSmoothL1LocalizationLoss())
+        self._first_stage_localization_loss = (
+            losses.WeightedSmoothL1LocalizationLoss())
+        self._hard_example_miner = False
 
 
 
@@ -341,8 +346,10 @@ class SSMMetaArch(model.DetectionModel):
             preprocessed_inputs,
             scope=self.feature_extractor_scope
         )
+
         depthwise_separable_output = self.build_depthwise_separable_layer(
             feature_extractor_output_map, self._is_training)
+
         deformable_feature_output = self.build_deformable_conv_layer(
             depthwise_separable_output, self._is_training)
 
@@ -458,7 +465,6 @@ class SSMMetaArch(model.DetectionModel):
         Returns:
         A float32 tensor with shape [K, new_height, new_width, depth].
         """
-        print(features_to_crop)
         cropped_regions = self._flatten_first_two_dimensions(
             self._crop_and_resize_fn(
                 features_to_crop, proposal_boxes_normalized,
@@ -474,13 +480,11 @@ class SSMMetaArch(model.DetectionModel):
         def select_anchor_locations_in_one_batch(args):
             valid_location = args[0]  # [height, width, 1]
             anchor_collection = args[1]
-            print(anchor_collection)
             anchor_collection = box_list.BoxList(anchor_collection)
             valid_location = tf.reshape(valid_location, [-1, 1])
             valid_location = tf.tile(valid_location,
                                      [1, self._num_anchors_per_location[0]])
             valid_location = tf.reshape(valid_location, [-1])
-            print(valid_location)
             selected_anchors = box_list_ops.boolean_mask(anchor_collection,
                                                          valid_location)
             # We normalize the selected_anchors
@@ -605,7 +609,7 @@ class SSMMetaArch(model.DetectionModel):
         with slim.arg_scope(self._depthwise_separable_layer_scope_fn()):
             depthwise_feature_out = tf.layers.separable_conv2d(
                 inputs=feature_extractor_output_map,
-                filters=512,
+                filters=256,
                 kernel_size=3,
                 padding='same',
                 activation=tf.nn.relu,
@@ -634,7 +638,7 @@ class SSMMetaArch(model.DetectionModel):
         deformable_feature_output = tl.layers.DeformableConv2d(
             depthwise_feature_tl,
             offset,
-            512,
+            128,
             act=tf.nn.relu
         )
         return deformable_feature_output
@@ -665,7 +669,7 @@ class SSMMetaArch(model.DetectionModel):
         with slim.arg_scope(self._attention_combiner_scope_fn()):
             attention_combiner_output = tf.layers.conv2d(
                 attention_feature_output,
-                filters=self._num_classes,
+                filters=self._num_classes + 1,
                 kernel_size=3,
                 padding='same',
                 activation=tf.nn.relu,
@@ -746,22 +750,22 @@ class SSMMetaArch(model.DetectionModel):
         refined_box_encodings_batch = tf.reshape(
             refined_box_encodings,
             [-1,
-             self.max_num_proposals,
+             self._max_anchors,
              refined_box_encodings.shape[1],
              self._box_coder.code_size])
         class_predictions_with_background_batch = tf.reshape(
             class_predictions_with_background,
-            [-1, self.max_num_proposals, self.num_classes + 1]
+            [-1, self._max_anchors, self.num_classes + 1]
         )
         refined_decoded_boxes_batch = self._batch_decode_boxes(
             refined_box_encodings_batch, proposal_boxes)
         class_predictions_with_background_batch = (
-            self._second_stage_score_conversion_fn(
+            self._fine_stage_box_score_conversion_fn(
                 class_predictions_with_background_batch))
         class_predictions_batch = tf.reshape(
             tf.slice(class_predictions_with_background_batch,
                      [0, 0, 1], [-1, -1, -1]),
-            [-1, self.max_num_proposals, self.num_classes])
+            [-1, self._max_anchors, self.num_classes])
         clip_window = self._compute_clip_window(image_shapes)
         mask_predictions_batch = None
         if mask_predictions is not None:
@@ -769,11 +773,11 @@ class SSMMetaArch(model.DetectionModel):
             mask_width = mask_predictions.shape[3].value
             mask_predictions = tf.sigmoid(mask_predictions)
             mask_predictions_batch = tf.reshape(
-                mask_predictions, [-1, self.max_num_proposals,
+                mask_predictions, [-1, self._max_anchors,
                                    self.num_classes, mask_height, mask_width])
 
         (nmsed_boxes, nmsed_scores, nmsed_classes, nmsed_masks, _,
-         num_detections) = self._second_stage_nms_fn(
+         num_detections) = self._fine_stage_nms_fn(
             refined_decoded_boxes_batch,
             class_predictions_batch,
             clip_window=clip_window,
@@ -819,8 +823,7 @@ class SSMMetaArch(model.DetectionModel):
             tf.expand_dims(anchor_boxes, 2), [1, 1, num_classes, 1])
         tiled_anchors_boxlist = box_list.BoxList(
             tf.reshape(tiled_anchor_boxes, [-1, 4]))
-        print(box_encodings)
-        print(tiled_anchors_boxlist.get())
+
         decoded_boxes = self._box_coder.decode(
             tf.reshape(box_encodings, [-1, self._box_coder.code_size]),
             tiled_anchors_boxlist)
@@ -856,6 +859,13 @@ class SSMMetaArch(model.DetectionModel):
             shape [num_boxes, image_height, image_width] containing instance masks.
             This is set to None if no masks exist in the provided groundtruth.
         """
+        groundtruth_pseudo_mask = self.groundtruth_lists(fields.InputDataFields.pseudo_mask)
+        groundtruth_pseudo_mask = tf.stack(groundtruth_pseudo_mask, axis=0)
+        groundtruth_pseudo_mask = tf.cast(groundtruth_pseudo_mask, tf.int32)
+        groundtruth_pseudo_mask = tf.one_hot(groundtruth_pseudo_mask, depth=self.num_classes + 1,
+                                             axis=3)
+        groundtruth_pseudo_mask = tf.squeeze(groundtruth_pseudo_mask)
+        print(groundtruth_pseudo_mask)
         groundtruth_boxlists = [
             box_list_ops.to_absolute_coordinates(
                 box_list.BoxList(boxes), true_image_shapes[i, 0],
@@ -871,6 +881,8 @@ class SSMMetaArch(model.DetectionModel):
 
         groundtruth_masks_list = self._groundtruth_lists.get(
             fields.BoxListFields.masks)
+        #print_op = tf.print('Groundtruth mask = ', groundtruth_masks_list)
+        #with tf.control_dependencies(print_op):
         # TODO(rathodv): Remove mask resizing once the legacy pipeline is deleted.
         if groundtruth_masks_list is not None and self._resize_masks:
             resized_masks_list = []
@@ -899,7 +911,7 @@ class SSMMetaArch(model.DetectionModel):
                 groundtruth_weights_list.append(groundtruth_weights)
 
         return (groundtruth_boxlists, groundtruth_classes_with_background_list,
-                groundtruth_masks_list, groundtruth_weights_list)
+                groundtruth_masks_list, groundtruth_weights_list, groundtruth_pseudo_mask)
 
     def loss(self, prediction_dict, true_image_shapes, scope=None):
         """Compute scalar loss tensors given prediction tensors.
@@ -931,7 +943,7 @@ class SSMMetaArch(model.DetectionModel):
         """
 
         (groundtruth_boxlists, groundtruth_classes_with_background_list,
-         groundtruth_masks_list, groundtruth_weights_list
+         groundtruth_masks_list, groundtruth_weights_list, groundtruth_pseudo_mask
          ) = self._format_groundtruth_data(true_image_shapes)
         prediction_dict_coarse = prediction_dict['coarse']
         with tf.name_scope(scope, 'CoarseStageLoss', prediction_dict.values()):
@@ -945,6 +957,10 @@ class SSMMetaArch(model.DetectionModel):
                     groundtruth_weights_list,
                     self._image_shape,
                     self._coarse_stage_target_assigner,
+                    self._coarse_stage_cls_loss,
+                    self._first_stage_localization_loss,
+                    self._first_stage_classification_loss_weight,
+                    self._first_stage_localization_loss_weight,
                     prediction_dict.get('mask_predictions'),
                     groundtruth_masks_list
                 )
@@ -960,12 +976,32 @@ class SSMMetaArch(model.DetectionModel):
                     groundtruth_weights_list,
                     self._image_shape,
                     self._fine_stage_target_assigner,
+                    self._fine_stage_cls_loss,
+                    self._second_stage_localization_loss,
+                    self._second_stage_classification_loss_weight,
+                    self._second_stage_localization_loss_weight,
                     prediction_dict.get('mask_predictions'),
                     groundtruth_masks_list
                 ))
 
+        with tf.name_scope(scope, 'SpatialAttentionLoss', prediction_dict.values()):
+            attention_loss = self.loss_spatial_attention(prediction_dict['attention_combiner_feature_output'],
+                                                       groundtruth_pseudo_mask)
+            loss_dict['spatial_loss'] = attention_loss
+
         return loss_dict
 
+
+    def loss_spatial_attention(self,
+                               attention_combiner_feature_output,
+                               pseudo_mask):
+
+        print(attention_combiner_feature_output)
+        loss_value = tf.nn.softmax_cross_entropy_with_logits_v2(labels=tf.reshape(pseudo_mask, [-1, self.num_classes + 1]),
+                                                                logits=tf.reshape(attention_combiner_feature_output, [-1, self.num_classes + 1]))
+
+        loss_value = tf.reduce_mean(loss_value)
+        return loss_value
     def _loss_box_classifier(self,
                              refined_box_encodings,
                              class_predictions_with_background,
@@ -976,6 +1012,10 @@ class SSMMetaArch(model.DetectionModel):
                              groundtruth_weights_list,
                              image_shape,
                              detector_target_assigner,
+                             cls_loss,
+                             loc_loss,
+                             cls_loss_weight,
+                             loc_loss_weight,
                              prediction_masks=None,
                              groundtruth_masks_list=None):
         """Computes scalar box classifier loss tensors.
@@ -1044,7 +1084,7 @@ class SSMMetaArch(model.DetectionModel):
             normalizer = tf.tile(num_proposals_or_one,
                                  [1, self._max_anchors]) * batch_size
 
-            print(detector_target_assigner)
+
             (batch_cls_targets_with_background, batch_cls_weights,
              batch_reg_targets,
              batch_reg_weights, _) = target_assigner.batch_assign_targets(
@@ -1065,7 +1105,7 @@ class SSMMetaArch(model.DetectionModel):
                 [batch_size * self._max_anchors, -1])
             one_hot_flat_cls_targets_with_background = tf.argmax(
                 flat_cls_targets_with_background, axis=1)
-            print(one_hot_flat_cls_targets_with_background)
+
             one_hot_flat_cls_targets_with_background = tf.one_hot(
                 one_hot_flat_cls_targets_with_background,
                 flat_cls_targets_with_background.get_shape()[1])
@@ -1089,13 +1129,13 @@ class SSMMetaArch(model.DetectionModel):
             if self.groundtruth_has_field(fields.InputDataFields.is_annotated):
                 losses_mask = tf.stack(self.groundtruth_lists(
                     fields.InputDataFields.is_annotated))
-            second_stage_loc_losses = self._second_stage_localization_loss(
+            second_stage_loc_losses = loc_loss(
                 reshaped_refined_box_encodings,
                 batch_reg_targets,
                 weights=batch_reg_weights,
                 losses_mask=losses_mask) / normalizer
             second_stage_cls_losses = ops.reduce_sum_trailing_dimensions(
-                self._second_stage_classification_loss(
+                cls_loss(
                     class_predictions_with_background,
                     batch_cls_targets_with_background,
                     weights=batch_cls_weights,
@@ -1112,12 +1152,12 @@ class SSMMetaArch(model.DetectionModel):
                  ) = self._unpad_proposals_and_apply_hard_mining(
                     proposal_boxlists, second_stage_loc_losses,
                     second_stage_cls_losses, num_proposals)
-            localization_loss = tf.multiply(self._second_stage_loc_loss_weight,
+            localization_loss = tf.multiply(loc_loss_weight,
                                             second_stage_loc_loss,
                                             name='localization_loss')
 
             classification_loss = tf.multiply(
-                self._second_stage_cls_loss_weight,
+                cls_loss_weight,
                 second_stage_cls_loss,
                 name='classification_loss')
 
@@ -1391,6 +1431,7 @@ class SSMMetaArch(model.DetectionModel):
         #     }
 
         # TODO(jrru): Remove mask_predictions from _post_process_box_classifier.
+        prediction_dict = prediction_dict['fine']
         with tf.name_scope('FineStagePostprocessor'):
           mask_predictions = prediction_dict.get(box_predictor.MASK_PREDICTIONS)
           detections_dict = self._postprocess_box_classifier(

@@ -97,6 +97,8 @@ message InputReader {
   // Whether to load groundtruth instance masks.
   optional bool load_instance_masks = 7 [default = false];
 
+  optional bool load_pseudo_mask = 80[default=false];
+
   // Type of instance mask.
   optional InstanceMaskType mask_type = 10 [default = NUMERICAL_MASKS];
 

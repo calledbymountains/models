@@ -242,6 +242,7 @@ class DetectionModel(object):
                           groundtruth_keypoints_list=None,
                           groundtruth_weights_list=None,
                           groundtruth_is_crowd_list=None,
+                          groundtruth_pseudo_mask_list=None,
                           is_annotated_list=None):
     """Provide groundtruth tensors.
 
@@ -288,6 +289,8 @@ class DetectionModel(object):
     if is_annotated_list:
       self._groundtruth_lists[
           fields.InputDataFields.is_annotated] = is_annotated_list
+    if groundtruth_pseudo_mask_list:
+      self._groundtruth_lists[fields.InputDataFields.pseudo_mask] = groundtruth_pseudo_mask_list
 
   @abstractmethod
   def restore_map(self, fine_tune_checkpoint_type='detection'):

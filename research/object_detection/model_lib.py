@@ -245,13 +245,18 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False):
       gt_is_crowd_list = None
       if fields.InputDataFields.groundtruth_is_crowd in labels:
         gt_is_crowd_list = labels[fields.InputDataFields.groundtruth_is_crowd]
+
+      gt_pseudo_masks = None
+      if fields.InputDataFields.pseudo_mask in labels:
+          gt_pseudo_masks = labels[fields.InputDataFields.pseudo_mask]
       detection_model.provide_groundtruth(
           groundtruth_boxes_list=gt_boxes_list,
           groundtruth_classes_list=gt_classes_list,
           groundtruth_masks_list=gt_masks_list,
           groundtruth_keypoints_list=gt_keypoints_list,
           groundtruth_weights_list=gt_weights_list,
-          groundtruth_is_crowd_list=gt_is_crowd_list)
+          groundtruth_is_crowd_list=gt_is_crowd_list,
+          groundtruth_pseudo_mask_list=gt_pseudo_masks)
 
     preprocessed_images = features[fields.InputDataFields.image]
     if use_tpu and train_config.use_bfloat16:
@@ -266,7 +271,7 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False):
       prediction_dict = detection_model.predict(
           preprocessed_images,
           features[fields.InputDataFields.true_image_shape])
-    if mode in (tf.estimator.ModeKeys.EVAL, tf.estimator.ModeKeys.PREDICT):
+    if mode in (tf.estimator.ModeKeys.TRAIN, tf.estimator.ModeKeys.EVAL, tf.estimator.ModeKeys.PREDICT):
       detections = detection_model.postprocess(
           prediction_dict, features[fields.InputDataFields.true_image_shape])
 

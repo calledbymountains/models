@@ -90,6 +90,7 @@ class InputDataFields(object):
   groundtruth_instance_masks = 'groundtruth_instance_masks'
   groundtruth_instance_boundaries = 'groundtruth_instance_boundaries'
   groundtruth_instance_classes = 'groundtruth_instance_classes'
+  pseudo_mask = 'pseudo_mask'
   groundtruth_keypoints = 'groundtruth_keypoints'
   groundtruth_keypoint_visibilities = 'groundtruth_keypoint_visibilities'
   groundtruth_label_scores = 'groundtruth_label_scores'
@@ -121,6 +122,7 @@ class DetectionResultFields(object):
   detection_scores = 'detection_scores'
   detection_classes = 'detection_classes'
   detection_masks = 'detection_masks'
+  pseudo_mask = 'pseudo_mask'
   detection_boundaries = 'detection_boundaries'
   detection_keypoints = 'detection_keypoints'
   num_detections = 'num_detections'
@@ -222,6 +224,7 @@ class TfExampleFields(object):
   object_segment_area = 'image/object/segment/area'
   object_weight = 'image/object/weight'
   instance_masks = 'image/segmentation/object'
+  pseudo_mask = 'image/object/mask',
   instance_boundaries = 'image/boundaries/object'
   instance_classes = 'image/segmentation/object/class'
   detection_class_label = 'image/detection/label'

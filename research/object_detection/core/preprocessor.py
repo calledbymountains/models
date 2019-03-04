@@ -444,6 +444,7 @@ def random_horizontal_flip(image,
                            boxes=None,
                            masks=None,
                            keypoints=None,
+                           pseudo_mask=None,
                            keypoint_flip_permutation=None,
                            seed=None,
                            preprocess_vars_cache=None):
@@ -534,6 +535,13 @@ def random_horizontal_flip(image,
           lambda: keypoints)
       result.append(keypoints)
 
+    # flip pseudo masks
+    if pseudo_mask is not None:
+        pseudo_mask = tf.cond(do_a_flip_random,
+                              lambda: _flip_image(pseudo_mask), lambda: pseudo_mask)
+
+        result.append(pseudo_mask)
+
     return tuple(result)
 
 
@@ -541,6 +549,7 @@ def random_vertical_flip(image,
                          boxes=None,
                          masks=None,
                          keypoints=None,
+                         pseudo_mask=None,
                          keypoint_flip_permutation=None,
                          seed=None,
                          preprocess_vars_cache=None):
@@ -630,6 +639,10 @@ def random_vertical_flip(image,
           lambda: keypoints)
       result.append(keypoints)
 
+    if pseudo_mask is not None:
+        pseudo_mask = tf.cond(do_a_flip_random, lambda: _flip_image(pseudo_mask), lambda: pseudo_mask)
+        result.append(pseudo_mask)
+
     return tuple(result)
 
 
@@ -637,6 +650,7 @@ def random_rotation90(image,
                       boxes=None,
                       masks=None,
                       keypoints=None,
+                      pseudo_mask=None,
                       seed=None,
                       preprocess_vars_cache=None):
   """Randomly rotates the image and detections 90 degrees counter-clockwise.
@@ -719,6 +733,12 @@ def random_rotation90(image,
           lambda: keypoint_ops.rot90(keypoints),
           lambda: keypoints)
       result.append(keypoints)
+
+    if pseudo_mask is not None:
+        pseudo_mask = tf.cond(do_a_rot90_random,
+                              lambda: _rot90_image(pseudo_mask),
+                              lambda: pseudo_mask)
+        result.append(pseudo_mask)
 
     return tuple(result)
 
@@ -2953,7 +2973,8 @@ def convert_class_logits_to_softmax(multiclass_scores, temperature=1.0):
 def get_default_func_arg_map(include_label_scores=False,
                              include_multiclass_scores=False,
                              include_instance_masks=False,
-                             include_keypoints=False):
+                             include_keypoints=False,
+                             include_pseudo_mask=False):
   """Returns the default mapping from a preprocessor function to its args.
 
   Args:
@@ -2987,6 +3008,10 @@ def get_default_func_arg_map(include_label_scores=False,
   if include_keypoints:
     groundtruth_keypoints = fields.InputDataFields.groundtruth_keypoints
 
+  pseudo_mask = None
+  if include_pseudo_mask:
+      pseudo_mask = fields.InputDataFields.pseudo_mask
+
   prep_func_arg_map = {
       normalize_image: (fields.InputDataFields.image,),
       random_horizontal_flip: (
@@ -2994,18 +3019,21 @@ def get_default_func_arg_map(include_label_scores=False,
           fields.InputDataFields.groundtruth_boxes,
           groundtruth_instance_masks,
           groundtruth_keypoints,
+          pseudo_mask
       ),
       random_vertical_flip: (
           fields.InputDataFields.image,
           fields.InputDataFields.groundtruth_boxes,
           groundtruth_instance_masks,
           groundtruth_keypoints,
+          pseudo_mask
       ),
       random_rotation90: (
           fields.InputDataFields.image,
           fields.InputDataFields.groundtruth_boxes,
           groundtruth_instance_masks,
           groundtruth_keypoints,
+          pseudo_mask
       ),
       random_pixel_value_scale: (fields.InputDataFields.image,),
       random_image_scale: (
@@ -3160,6 +3188,13 @@ def preprocess(tensor_dict,
     image = tf.squeeze(images, axis=0)
     tensor_dict[fields.InputDataFields.image] = image
 
+  if fields.InputDataFields.pseudo_mask in tensor_dict:
+      pseudo_mask = tensor_dict[fields.InputDataFields.pseudo_mask]
+      if len(pseudo_mask.get_shape()) !=4:
+          raise ValueError('Pseudo mask in tensor_dict should be rank 4')
+      pseudo_mask = tf.squeeze(pseudo_mask, axis=0)
+      tensor_dict[fields.InputDataFields.pseudo_mask] = pseudo_mask
+
   # Preprocess inputs based on preprocess_options
   for option in preprocess_options:
     func, params = option
@@ -3193,5 +3228,10 @@ def preprocess(tensor_dict,
     image = tensor_dict[fields.InputDataFields.image]
     images = tf.expand_dims(image, 0)
     tensor_dict[fields.InputDataFields.image] = images
+
+  if fields.InputDataFields.pseudo_mask in tensor_dict:
+      pseudo_mask = tensor_dict[fields.InputDataFields.pseudo_mask]
+      pseudo_mask = tf.expand_dims(pseudo_mask, 0)
+      tensor_dict[fields.InputDataFields.pseudo_mask] = pseudo_mask
 
   return tensor_dict

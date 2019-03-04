@@ -80,7 +80,7 @@ message TrainConfig {
   optional int32 num_batch_queue_threads = 15 [default=8];
 
   // Maximum capacity of the queue used to prefetch assembled batches.
-  optional int32 prefetch_queue_capacity = 16 [default=5];
+  optional int32 prefetch_queue_capacity = 16 [default=50];
 
   // If true, boxes with the same coordinates will be merged together.
   // This is useful when each box can have multiple labels.

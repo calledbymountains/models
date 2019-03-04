@@ -126,6 +126,7 @@ class TfExampleDecoder(data_decoder.DataDecoder):
 
   def __init__(self,
                load_instance_masks=False,
+               load_pseudo_mask=False,
                instance_mask_type=input_reader_pb2.NUMERICAL_MASKS,
                label_map_proto_file=None,
                use_display_name=False,
@@ -204,7 +205,7 @@ class TfExampleDecoder(data_decoder.DataDecoder):
         'image/object/group_of':
             tf.VarLenFeature(tf.int64),
         'image/object/weight':
-            tf.VarLenFeature(tf.float32),
+            tf.VarLenFeature(tf.float32)
     }
     # We are checking `dct_method` instead of passing it directly in order to
     # ensure TF version 1.6 compatibility.
@@ -228,6 +229,7 @@ class TfExampleDecoder(data_decoder.DataDecoder):
           format_key='image/format',
           channels=1,
           repeated=True)
+
     self.items_to_handlers = {
         fields.InputDataFields.image:
             image,
@@ -250,8 +252,17 @@ class TfExampleDecoder(data_decoder.DataDecoder):
         fields.InputDataFields.groundtruth_group_of: (
             slim_example_decoder.Tensor('image/object/group_of')),
         fields.InputDataFields.groundtruth_weights: (
-            slim_example_decoder.Tensor('image/object/weight')),
+            slim_example_decoder.Tensor('image/object/weight'))
+
+
     }
+
+    if load_pseudo_mask:
+        self.keys_to_features['image/object/mask'] = (tf.FixedLenFeature((), tf.string, default_value=''))
+        self.items_to_handlers[
+            fields.InputDataFields.pseudo_mask
+        ] = ( slim_example_decoder.Image(image_key='image/object/mask', channels=1))
+
     if num_additional_channels > 0:
       self.keys_to_features[
           'image/additional_channels/encoded'] = tf.FixedLenFeature(
@@ -377,6 +388,9 @@ class TfExampleDecoder(data_decoder.DataDecoder):
       channels = tf.squeeze(channels, axis=3)
       channels = tf.transpose(channels, perm=[1, 2, 0])
       tensor_dict[fields.InputDataFields.image_additional_channels] = channels
+
+    if fields.InputDataFields.pseudo_mask in tensor_dict:
+        tensor_dict[fields.InputDataFields.pseudo_mask].set_shape([None, None, 1])
 
     def default_groundtruth_weights():
       return tf.ones(

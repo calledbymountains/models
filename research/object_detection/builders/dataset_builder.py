@@ -23,6 +23,7 @@ that wraps the build function.
 """
 import functools
 import tensorflow as tf
+import multiprocessing as mp
 
 from object_detection.data_decoders import tf_example_decoder
 from object_detection.protos import input_reader_pb2
@@ -117,6 +118,7 @@ def build(input_reader_config, batch_size=None, transform_input_data_fn=None):
       label_map_proto_file = input_reader_config.label_map_path
     decoder = tf_example_decoder.TfExampleDecoder(
         load_instance_masks=input_reader_config.load_instance_masks,
+        load_pseudo_mask=input_reader_config.load_pseudo_mask,
         instance_mask_type=input_reader_config.mask_type,
         label_map_proto_file=label_map_proto_file,
         use_display_name=input_reader_config.use_display_name,
@@ -142,7 +144,7 @@ def build(input_reader_config, batch_size=None, transform_input_data_fn=None):
       num_parallel_calls = input_reader_config.num_parallel_map_calls
     dataset = dataset.map(
         process_fn,
-        num_parallel_calls=num_parallel_calls)
+        num_parallel_calls=mp.cpu_count() * 2)
     if batch_size:
       dataset = dataset.apply(
           tf.contrib.data.batch_and_drop_remainder(batch_size))
