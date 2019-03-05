@@ -410,10 +410,12 @@ def batch_multiclass_non_max_suppression(boxes,
       per_image_boxes = tf.reshape(
           tf.slice(per_image_boxes, 3 * [0],
                    tf.stack([per_image_num_valid_boxes, -1, -1])), [-1, q, 4])
+
+
       per_image_scores = tf.reshape(
-          tf.slice(per_image_scores, [0, 0],
-                   tf.stack([per_image_num_valid_boxes, -1])),
-          [-1, num_classes])
+        tf.slice(per_image_scores, [0, 0],
+                 tf.stack([per_image_num_valid_boxes, -1])),
+        [-1, num_classes])
       per_image_masks = tf.reshape(
           tf.slice(per_image_masks, 4 * [0],
                    tf.stack([per_image_num_valid_boxes, -1, -1, -1])),

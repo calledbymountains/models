@@ -402,7 +402,6 @@ class SSMMetaArch(model.DetectionModel):
         # anchor_count [batchsize]
         selected_anchors_minibatch, anchor_count = self.select_anchor_locations_over_batch(
             valid_locations, anchors)
-
         coarse_prediction_dict = self.predict_coarse_stage(
             deformable_feature_output.outputs,
             selected_anchors_minibatch,
@@ -493,11 +492,13 @@ class SSMMetaArch(model.DetectionModel):
                 height=self._image_shape[1],
                 width=self._image_shape[2])
             num_anchors = selected_anchors.num_boxes()
-            '''
+
+
             num_anchors = tf.cond(tf.less_equal(num_anchors, self._max_anchors),
                                   lambda: num_anchors,
                                   lambda: self._max_anchors)
-            '''
+
+
             batched_selected_anchors = box_list_ops.pad_or_clip_box_list(
                 selected_anchors,
                 self._max_anchors).get()

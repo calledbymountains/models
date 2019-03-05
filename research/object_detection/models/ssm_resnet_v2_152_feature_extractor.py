@@ -1,4 +1,5 @@
 import tensorflow as tf
+
 from object_detection.meta_architectures import ssm_meta_arch
 from nets import resnet_utils
 from nets import resnet_v2

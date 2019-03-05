@@ -271,7 +271,7 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False):
       prediction_dict = detection_model.predict(
           preprocessed_images,
           features[fields.InputDataFields.true_image_shape])
-    if mode in (tf.estimator.ModeKeys.TRAIN, tf.estimator.ModeKeys.EVAL, tf.estimator.ModeKeys.PREDICT):
+    if mode in (tf.estimator.ModeKeys.EVAL, tf.estimator.ModeKeys.PREDICT):
       detections = detection_model.postprocess(
           prediction_dict, features[fields.InputDataFields.true_image_shape])
 
@@ -416,7 +416,7 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False):
 
       # Eval metrics on a single example.
       eval_metric_ops = eval_util.get_eval_metric_ops_for_evaluators(
-          eval_config, category_index.values(), eval_dict)
+          eval_config, list(category_index.values()), eval_dict)
       for loss_key, loss_tensor in iter(losses_dict.items()):
         eval_metric_ops[loss_key] = tf.metrics.mean(loss_tensor)
       for var in optimizer_summary_vars:
@@ -657,13 +657,13 @@ def create_train_and_eval_specs(train_input_fn,
         tf.estimator.EvalSpec(
             name=eval_spec_name,
             input_fn=eval_input_fn,
-            steps=None,
+            steps=10,
             exporters=exporter))
 
   if eval_on_train_data:
     eval_specs.append(
         tf.estimator.EvalSpec(
-            name='eval_on_train', input_fn=eval_on_train_input_fn, steps=None))
+            name='eval_on_train', input_fn=eval_on_train_input_fn, steps=10))
 
   return train_spec, eval_specs
 
