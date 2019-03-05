@@ -383,6 +383,7 @@ class SSMMetaArch(model.DetectionModel):
         valid_locations = tf.greater_equal(class_selection_feature_map,
                                                     self._selection_threshold)
         self._num_anchors_per_location = self._anchor_generator.num_anchors_per_location()
+
         if len(self._num_anchors_per_location) != 1:
             raise RuntimeError(
                 'anchor_generator is expected to generate anchors '
@@ -486,6 +487,11 @@ class SSMMetaArch(model.DetectionModel):
             valid_location = tf.reshape(valid_location, [-1])
             selected_anchors = box_list_ops.boolean_mask(anchor_collection,
                                                          valid_location)
+
+            print_op = tf.print(tf.shape(selected_anchors.get()))
+            with tf.control_dependencies([print_op]):
+                selected_anchors = tf.cond(tf.equal(tf.rank(selected_anchors.get()), 1), lambda: anchor_collection.get(), lambda: selected_anchors.get())
+            selected_anchors = box_list.BoxList(selected_anchors)
             # We normalize the selected_anchors
             selected_anchors = box_list_ops.to_normalized_coordinates(
                 selected_anchors,
