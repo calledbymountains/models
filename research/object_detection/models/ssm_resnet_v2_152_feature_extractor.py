@@ -19,7 +19,7 @@ class SSMResnetV2FeatureExtractor(
                  features_output_stride,
                  batch_norm_trainable=False,
                  reuse_weights=None,
-                 weight_decay=0.0):
+                 weight_decay=0.00005):
         """Constructor.
 
         Args:
@@ -147,7 +147,7 @@ class SSMResnet152FeatureExtractor(SSMResnetV2FeatureExtractor):
                  features_output_stride,
                  batch_norm_trainable=False,
                  reuse_weights=None,
-                 weight_decay=0.0):
+                 weight_decay=0.00005):
         """Constructor.
         
         Args:

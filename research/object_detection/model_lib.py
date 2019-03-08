@@ -35,6 +35,7 @@ from object_detection.utils import label_map_util
 from object_detection.utils import shape_utils
 from object_detection.utils import variables_helper
 from object_detection.utils import visualization_utils as vis_utils
+from object_detection.core import box_list_ops, box_list
 
 # A map of names to methods that help build the model.
 MODEL_BUILD_UTIL_MAP = {
@@ -271,6 +272,25 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False):
       prediction_dict = detection_model.predict(
           preprocessed_images,
           features[fields.InputDataFields.true_image_shape])
+
+      att_summ = []
+      if 'pedestrian_confidence_output' in prediction_dict:
+          attention_feature_output = prediction_dict['pedestrian_confidence_output']
+          #attention_feature_output = tf.unstack(attention_feature_output, axis=3)
+          #attention_feature_output = [tf.expand_dims(x, axis=3) for x in attention_feature_output]
+          att_summ.append(tf.summary.image('attention_map', attention_feature_output))
+          att_summ.append(tf.summary.image('original_image', features[fields.InputDataFields.image]))
+
+          # for index, feat in enumerate(attention_feature_output):
+          #     summ = tf.summary.image('attention_class_{}'.format(index+1), feat)
+          #     att_summ.append(summ)
+          # im = tf.summary.image('original_image', features[fields.InputDataFields.image])
+          # att_summ.append(im)
+          anchors_minibatch = prediction_dict['selected_anchors_minibatch']
+          anchors_vis = box_list_ops.visualize_boxes_in_image(features[fields.InputDataFields.image][0,:,:,:],
+                                                              box_list.BoxList(anchors_minibatch[0,:,:]), normalized=True)
+          att_summ.append(tf.summary.image('anchors', tf.expand_dims(anchors_vis,0)))
+
     if mode in (tf.estimator.ModeKeys.EVAL, tf.estimator.ModeKeys.PREDICT):
       detections = detection_model.postprocess(
           prediction_dict, features[fields.InputDataFields.true_image_shape])
@@ -358,6 +378,8 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False):
         for var in optimizer_summary_vars:
           tf.summary.scalar(var.op.name, var)
       summaries = [] if use_tpu else None
+      if not att_summ:
+          summaries+=att_summ
       train_op = tf.contrib.layers.optimize_loss(
           loss=total_loss,
           global_step=global_step,
