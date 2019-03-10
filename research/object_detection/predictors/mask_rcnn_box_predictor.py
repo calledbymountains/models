@@ -107,7 +107,7 @@ class MaskRCNNBoxPredictor(box_predictor.BoxPredictor):
           [batch_size, 1, num_classes + 1] representing the class
           predictions for the proposals.
         MASK_PREDICTIONS: A float tensor of shape
-          [batch_size, 1, num_classes, image_height, image_width]
+           [batch_size, 1, num_classes, image_height, image_width]
 
     Raises:
       ValueError: If num_predictions_per_location is not 1 or if

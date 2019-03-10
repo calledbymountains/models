@@ -280,16 +280,20 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False):
           #attention_feature_output = [tf.expand_dims(x, axis=3) for x in attention_feature_output]
           att_summ.append(tf.summary.image('attention_map', attention_feature_output))
           att_summ.append(tf.summary.image('original_image', features[fields.InputDataFields.image]))
-
+          anchors_minibatch = prediction_dict['selected_anchors_minibatch']
+          for num in range(anchors_minibatch.get_shape()[0]):
+              anchors_vis = box_list_ops.visualize_boxes_in_image(
+                  features[fields.InputDataFields.image][num, :, :, :],
+                  box_list.BoxList(anchors_minibatch[num, :, :]), normalized=True)
+              att_summ.append(
+                  tf.summary.image('anchors_{}'.format(num+1), tf.expand_dims(anchors_vis, 0)))
           # for index, feat in enumerate(attention_feature_output):
           #     summ = tf.summary.image('attention_class_{}'.format(index+1), feat)
           #     att_summ.append(summ)
           # im = tf.summary.image('original_image', features[fields.InputDataFields.image])
           # att_summ.append(im)
-          anchors_minibatch = prediction_dict['selected_anchors_minibatch']
-          anchors_vis = box_list_ops.visualize_boxes_in_image(features[fields.InputDataFields.image][0,:,:,:],
-                                                              box_list.BoxList(anchors_minibatch[0,:,:]), normalized=True)
-          att_summ.append(tf.summary.image('anchors', tf.expand_dims(anchors_vis,0)))
+
+
 
     if mode in (tf.estimator.ModeKeys.EVAL, tf.estimator.ModeKeys.PREDICT):
       detections = detection_model.postprocess(

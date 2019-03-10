@@ -62,7 +62,10 @@ def main(unused_argv):
   flags.mark_flag_as_required('model_dir')
   flags.mark_flag_as_required('pipeline_config_path')
 
-  config = tf.estimator.RunConfig(model_dir=FLAGS.model_dir, log_step_count_steps=100)
+  # config_xla = tf.ConfigProto()
+  # config_xla.graph_options.optimizer_options.global_jit_level = tf.OptimizerOptions.ON_1
+
+  config = tf.estimator.RunConfig(model_dir=FLAGS.model_dir, log_step_count_steps=100, keep_checkpoint_max=10)
 
   train_and_eval_dict = model_lib.create_estimator_and_inputs(
       run_config=config,
