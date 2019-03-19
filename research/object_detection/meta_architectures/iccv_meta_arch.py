@@ -17,7 +17,7 @@ from object_detection.utils import shape_utils
 slim = tf.contrib.slim
 
 
-class SSMFeatureExtractor(object):
+class ICCVFeatureExtractor(object):
     def __init__(self,
                  is_training,
                  features_output_stride,
@@ -93,7 +93,7 @@ class SSMFeatureExtractor(object):
         return variables_to_restore
 
 
-class SSMMetaArch(model.DetectionModel):
+class ICCVMetaArch(model.DetectionModel):
     """SSM Meta-architecture definition."""
 
     def __init__(self,
@@ -150,7 +150,7 @@ class SSMMetaArch(model.DetectionModel):
         grid_anchor_generator.GridAnchorGenerator objects)
         #TODO : Add documentation of other arguments
         """
-        super(SSMMetaArch, self).__init__(num_classes=num_classes)
+        super(ICCVMetaArch, self).__init__(num_classes=num_classes)
         if not isinstance(anchor_generator,
                           grid_anchor_generator.GridAnchorGenerator):
             raise ValueError('anchor_generator must be of type '
@@ -341,53 +341,38 @@ class SSMMetaArch(model.DetectionModel):
         Raises:
         ValueError: If `predict` is called before `preprocess`.
         """
-        image_shape = tf.shape(preprocessed_inputs)
-        self._image_shape = image_shape
-        feature_extractor_output_map = self._feature_extractor.extract_input_features(
-            preprocessed_inputs,
-            scope=self.feature_extractor_scope
-        )
+        prediction_dict = dict()
+        with tf.name_scope('Feature_extractor_output', values=[preprocessed_inputs]):
+            image_shape = tf.shape(preprocessed_inputs)
+            self._image_shape = image_shape
+            feature_extractor_output_map = self._feature_extractor.extract_input_features(
+                preprocessed_inputs,
+                scope=self.feature_extractor_scope
+            )
 
-        depthwise_separable_output = self.build_depthwise_separable_layer(
-            feature_extractor_output_map, self._is_training)
-        '''
-        deformable_feature_output = self.build_deformable_conv_layer(
-            depthwise_separable_output, self._is_training)
-        '''
-        deformable_feature_output = depthwise_separable_output
+            feature_extractor_output_map = self.build_depthwise_separable_layer(
+                feature_extractor_output_map, self._is_training)
+
         semantic_attention_feature_output = self.build_semantic_attention_layer(
-            deformable_feature_output, self._is_training)
+            feature_extractor_output_map, self._is_training)
         attention_combiner_feature_output = self.build_attention_combiner_layer(
             semantic_attention_feature_output, self._is_training)
         attention_confidence_output = tf.nn.softmax(
             attention_combiner_feature_output,
             axis=3)
-        foreground_confidence_output = tf.expand_dims(attention_confidence_output[:,:,:,1], axis=3)
         # Select all but the background class.
-        pedestrian_confidence_output = tf.expand_dims(tf.reduce_max(attention_confidence_output[:, :, :, 1:], axis=3), axis=3)
-        #pedestrian_confidence_output = attention_confidence_output[:,:,:,1:]
-        class_selection_feature_map = pedestrian_confidence_output
-        # # Concatenate with the deformable convolution output feature map.
-        # pedestrian_selector_feature = tf.concat([pedestrian_confidence_output,
-        #                                          deformable_feature_output.outputs],
-        #                                         axis=3)
-        # pedestrian_reducer_feature_output = self.build_attention_reducer_layer(
-        #     pedestrian_selector_feature,
-        #     self._is_training)
-        # # Reduce the output to one feature map with one channel.
-        # class_selection_feature_map = tf.layers.conv2d(
-        #     pedestrian_reducer_feature_output,
-        #     filters=1,
-        #     kernel_size=3,
-        #     padding='same',
-        #     activation=tf.nn.relu,
-        #     trainable=self._is_training
-        # )
+        pedestrian_confidence_output = tf.expand_dims(attention_confidence_output[:, :, :, 1], axis=3)
+        prediction_dict['pedestrian_confidence_output'] = pedestrian_confidence_output
 
+        # We flatten the pedestrian confidence output below just to ensure compatibility with tf.nn.top_k
+        cls_map = tf.reshape(pedestrian_confidence_output, [self._image_shape[0], -1])
         # Select topK locations
-        cls_map = tf.reshape(class_selection_feature_map, [self._image_shape[0], -1])
-
-        top_values, _= tf.nn.top_k(cls_map, k=100)
+        top_values, _= tf.nn.top_k(cls_map, k=2000)
+        # We want to select the top K locations. Generally one will use argmax for this.
+        # But argmax does not have a defined gradient. So we use a hack.
+        # The hack is that we select the minimum of the top K values
+        # And then we just create a boolean mask where all values above that minimum value
+        # are set to True.
         minimum_top_value = tf.reduce_min(top_values, axis=1)
         valid_locations = tf.map_fn(lambda x : tf.greater_equal(x[0], x[1]), (cls_map, minimum_top_value), dtype=tf.bool)
 
@@ -401,9 +386,9 @@ class SSMMetaArch(model.DetectionModel):
                 'anchor_generator is expected to generate anchors '
                 'corresponding to a single feature map.')
         anchors = self._anchor_generator.generate(
-            [(class_selection_feature_map.shape[1],
-             class_selection_feature_map.shape[2])])
-        # Anchors are designed as a list of length one with a BoxList.
+            [(pedestrian_confidence_output.shape[1],
+             pedestrian_confidence_output.shape[2])])
+        # Anchors are designed as a BoxList of length one.
         anchors = anchors[0]
         # We make sure that we clip all the anchors to the image size.
         anchors = box_list_ops.clip_to_window(anchors, window=[0.0, 0.0,
@@ -411,6 +396,12 @@ class SSMMetaArch(model.DetectionModel):
                                                                    1], tf.float32),
                                                                tf.cast(image_shape[
                                                                    2], tf.float32)])
+
+
+        # We compute a hadamard product of the pedestrian confidence map and the feature extractor output map
+        # This product makes it easy for the anchor classifier to learn to find the positive anchors.
+        anchor_classification_feature_map = pedestrian_confidence_output * feature_extractor_output_map
+
         # selected_anchors_minibatch [batchsize, max_anchors, 4]
         # anchor_count [batchsize]
         selected_anchors_minibatch, anchor_count = self.select_anchor_locations_over_batch(
@@ -420,38 +411,6 @@ class SSMMetaArch(model.DetectionModel):
             selected_anchors_minibatch,
             anchor_count,
             image_shape)
-
-        # coarse_detection_dict = self._postprocess_box_classifier(
-        #     coarse_prediction_dict['refined_box_encodings'],
-        #     coarse_prediction_dict['class_predictions_with_background'],
-        #     coarse_prediction_dict['proposal_boxes'],
-        #     coarse_prediction_dict['num_proposals'],
-        #     true_image_shapes
-        #     )
-
-        # refined_box_encodings = coarse_prediction_dict['refined_box_encodings']
-        # refined_box_encodings = tf.reshape(refined_box_encodings,
-        #                                    [self._image_shape[0], self._max_anchors, self.num_classes, 4])
-        # refined_box_encodings = self._batch_decode_boxes(refined_box_encodings,
-        #                                                  selected_anchors_minibatch)
-
-        #refined_box_encodings = tf.reshape(refined_box_encodings, [image_shape[0], -1, 4])
-
-        # fine_prediction_dict = self.predict_fine_stage(deformable_feature_output,
-        #                                                refined_box_encodings,
-        #                                                anchor_count,
-        #                                                image_shape)
-
-
-        # fine_detection_dict = self._postprocess_box_classifier(
-        #     fine_prediction_dict['refined_box_encodings'],
-        #     fine_prediction_dict['class_predictions_with_background'],
-        #     fine_prediction_dict['proposal_boxes'],
-        #     fine_prediction_dict['num_proposals'],
-        #     true_image_shapes
-        #     )
-
-        #print(fine_prediction_dict)
 
         return dict(coarse=coarse_prediction_dict,
                     #fine=fine_prediction_dict,
@@ -489,6 +448,17 @@ class SSMMetaArch(model.DetectionModel):
             cropped_regions,
             [self._maxpool_kernel_size, self._maxpool_kernel_size],
             stride=2* self._maxpool_kernel_stride)
+
+
+    def build_anchor_classification_layer(self, input_feature_map):
+        with tf.name_scope('Anchor_Classification_Layer', values=[input_feature_map]):
+            pass
+
+    def build_anchor_classifier_filter_size(self, feature_stride):
+        anchor_base_height = self._anchor_generator._base_anchor_size[0]
+        anchor_base_width = self._anchor_generator._base_anchor_size[1]
+        anchor_aspect_ratios = self._anchor_generator._aspect_ratios
+        anchor_scales = self._anchor_generator._scales
 
 
 
@@ -992,30 +962,7 @@ class SSMMetaArch(model.DetectionModel):
                     prediction_dict.get('mask_predictions'),
                     groundtruth_masks_list
                 )
-        # prediction_dict_fine = prediction_dict['fine']
-        # # print_op = tf.print("loss_dict one = ", loss_dict)
-        # #with tf.control_dependencies([print_op]):
-        # with tf.name_scope(scope, 'FineStageLoss', prediction_dict.values()):
-        #     loss_dict.update(self._loss_box_classifier(
-        #             prediction_dict_fine['refined_box_encodings'],
-        #             prediction_dict_fine['class_predictions_with_background'],
-        #             prediction_dict_fine['proposal_boxes'],
-        #             prediction_dict_fine['num_proposals'],
-        #             groundtruth_boxlists,
-        #             groundtruth_classes_with_background_list,
-        #             groundtruth_weights_list,
-        #             self._image_shape,
-        #             self._fine_stage_target_assigner,
-        #             self._fine_stage_cls_loss,
-        #             self._second_stage_localization_loss,
-        #             self._second_stage_classification_loss_weight,
-        #             self._second_stage_localization_loss_weight,
-        #             prediction_dict.get('mask_predictions'),
-        #             groundtruth_masks_list
-        #         ))
-        # print_op = tf.print("loss_dict one = ", loss_dict)
 
-        # with tf.control_dependencies([print_op]):
         with tf.name_scope(scope, 'SpatialAttentionLoss', prediction_dict.values()):
             attention_loss = self.loss_spatial_attention(prediction_dict['attention_combiner_feature_output'],
                                                        groundtruth_pseudo_mask)
@@ -1454,22 +1401,6 @@ class SSMMetaArch(model.DetectionModel):
         Raises:
           ValueError: If `predict` is called before `preprocess`.
         """
-
-        # with tf.name_scope('FirstStagePostprocessor'):
-        #   if self._number_of_stages == 1:
-        #     proposal_boxes, proposal_scores, num_proposals = self._postprocess_rpn(
-        #         prediction_dict['rpn_box_encodings'],
-        #         prediction_dict['rpn_objectness_predictions_with_background'],
-        #         prediction_dict['anchors'],
-        #         true_image_shapes,
-        #         true_image_shapes)
-        #     return {
-        #         fields.DetectionResultFields.detection_boxes: proposal_boxes,
-        #         fields.DetectionResultFields.detection_scores: proposal_scores,
-        #         fields.DetectionResultFields.num_detections:
-        #             tf.to_float(num_proposals),
-        #     }
-
         # TODO(jrru): Remove mask_predictions from _post_process_box_classifier.
         prediction_dict = prediction_dict['coarse']
         with tf.name_scope('FineStagePostprocessor'):
@@ -1482,14 +1413,3 @@ class SSMMetaArch(model.DetectionModel):
             true_image_shapes,
             mask_predictions=mask_predictions)
         return detections_dict
-
-        # if self._number_of_stages == 3:
-        #   # Post processing is already performed in 3rd stage. We need to transfer
-        #   # postprocessed tensors from `prediction_dict` to `detections_dict`.
-        #   detections_dict = {}
-        #   for key in prediction_dict:
-        #     if key == fields.DetectionResultFields.detection_masks:
-        #       detections_dict[key] = tf.sigmoid(prediction_dict[key])
-        #     elif 'detection' in key:
-        #       detections_dict[key] = prediction_dict[key]
-        #   return detections_dict
