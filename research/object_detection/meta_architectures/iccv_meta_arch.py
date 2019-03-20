@@ -1,6 +1,5 @@
 from abc import abstractmethod
 import tensorflow as tf
-import tensorlayer as tl
 from object_detection.anchor_generators import grid_anchor_generator
 from object_detection.builders import box_predictor_builder
 from object_detection.core import box_list
@@ -12,6 +11,7 @@ from object_detection.core import standard_fields as fields
 from object_detection.core import target_assigner
 from object_detection.utils import ops
 from object_detection.utils import shape_utils
+import numpy as np
 
 
 slim = tf.contrib.slim
@@ -402,6 +402,15 @@ class ICCVMetaArch(model.DetectionModel):
         # This product makes it easy for the anchor classifier to learn to find the positive anchors.
         anchor_classification_feature_map = pedestrian_confidence_output * feature_extractor_output_map
 
+        anchor_classification_output = self.build_anchor_classification_layer(anchor_classification_feature_map)
+
+        anchor_classification_softmax = [tf.nn.softmax(x, axis=3)[1] for x in anchor_classification_output]
+
+
+
+
+
+
         # selected_anchors_minibatch [batchsize, max_anchors, 4]
         # anchor_count [batchsize]
         selected_anchors_minibatch, anchor_count = self.select_anchor_locations_over_batch(
@@ -449,10 +458,25 @@ class ICCVMetaArch(model.DetectionModel):
             [self._maxpool_kernel_size, self._maxpool_kernel_size],
             stride=2* self._maxpool_kernel_stride)
 
-
     def build_anchor_classification_layer(self, input_feature_map):
         with tf.name_scope('Anchor_Classification_Layer', values=[input_feature_map]):
-            pass
+            feature_stride = self._image_shape[0] / tf.shape(input_feature_map)[0]
+            filter_sizes = self.build_anchor_classifier_filter_size(feature_stride)
+            outputs = []
+            for ind, filter_size in enumerate(filter_sizes):
+                output = tf.layers.conv2d(inputs=input_feature_map,
+                                          filters=32,
+                                          kernel_size=filter_size,
+                                          use_bias=True,
+                                          kernel_initializer=tf.initializers.variance_scaling(),
+                                          kernel_regularizer=tf.contrib.regularizers.l2_regularizer(scale=0.0005),
+                                          padding='SAME')
+                output = tf.layers.batch_normalization(output, training=self._is_training,
+                                                       trainable=self._is_training)
+                output = tf.layers.conv2d(output, filters=2, kernel_size=1, padding='SAME',
+                                          kernel_initializer=tf.initializers.variance_scaling())
+                outputs.append(output)
+        return outputs
 
     def build_anchor_classifier_filter_size(self, feature_stride):
         anchor_base_height = self._anchor_generator._base_anchor_size[0]
@@ -460,8 +484,16 @@ class ICCVMetaArch(model.DetectionModel):
         anchor_aspect_ratios = self._anchor_generator._aspect_ratios
         anchor_scales = self._anchor_generator._scales
 
-
-
+        anchor_heights = [x / np.sqrt(y) * anchor_base_height for x,y in zip(anchor_scales,
+                                                                             anchor_aspect_ratios)]
+        anchor_widths = [x * np.sqrt(y) * anchor_base_width for x,y in zip(anchor_scales,
+                                                                           anchor_aspect_ratios)]
+        anchor_heights/= feature_stride
+        anchor_widths/=feature_stride
+        anchor_heights = int(np.ceil(anchor_heights))
+        anchor_widths = int(np.ceil(anchor_widths))
+        filter_sizes = [(x,y) for x,y in zip(anchor_heights,anchor_widths)]
+        return filter_sizes
 
     def select_anchor_locations_over_batch(self, valid_locations, anchors):
         """Selects the anchor center locations."""
@@ -506,6 +538,15 @@ class ICCVMetaArch(model.DetectionModel):
             (valid_locations, anchors),
             dtype=(tf.float32, tf.int32))
         return selected_anchors_minibatch
+
+    def anchor_selector_layer(self, anchor_classification_softmax, anchors):
+        with tf.name_scope('Anchor_Selection_Layer', values=[anchor_classification_softmax]):
+            anchor_classification_mask = [tf.greater_equal(x) for x in anchor_classification_softmax]
+            num_anchors_per_location = self._anchor_generator.num_anchors_per_location()
+            anchors_split = [anchors[x::num_anchors_per_location, :] for
+                             x, _ in enumerate(anchor_classification_softmax)]
+            positive_anchors = [tf.boolean_mask()]
+            pass
 
     def predict_coarse_stage(self, feature_map_to_crop, selected_anchors,
                              num_anchors,
