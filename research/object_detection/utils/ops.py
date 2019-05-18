@@ -469,7 +469,7 @@ def filter_groundtruth_with_nan_box_coordinates(tensor_dict):
   """
   groundtruth_boxes = tensor_dict[fields.InputDataFields.groundtruth_boxes]
   nan_indicator_vector = tf.greater(tf.reduce_sum(tf.to_int32(
-      tf.is_nan(groundtruth_boxes)), reduction_indices=[1]), 0)
+      tf.is_nan(groundtruth_boxes)), axis=1), 0)
   valid_indicator_vector = tf.logical_not(nan_indicator_vector)
   valid_indices = tf.where(valid_indicator_vector)
 
