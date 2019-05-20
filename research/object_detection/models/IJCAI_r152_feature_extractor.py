@@ -3,7 +3,6 @@ from object_detection.meta_architectures import ijcai_meta_arch
 from nets.resnet_utils import resnet_arg_scope
 from nets.resnet_v2 import resnet_v2_152
 
-
 slim = tf.contrib.slim
 
 
@@ -27,7 +26,7 @@ class IJCAIResNet152FeatureExtractor(ijcai_meta_arch.IJCAIFeatureExtractor):
            Raises:
              ValueError: If `first_stage_features_stride` is not 8 or 16.
            """
-        if output_stride != 8 and output_stride!= 16:
+        if output_stride != 8 and output_stride != 16:
             raise ValueError('`output_stride` must be 8 or 16.')
         super(IJCAIResNet152FeatureExtractor, self).__init__('IJCAIResnet152Extractor',
                                                              is_training,
@@ -54,18 +53,24 @@ class IJCAIResNet152FeatureExtractor(ijcai_meta_arch.IJCAIFeatureExtractor):
     def preprocess(self, resized_inputs):
         """IJCAI Detector with ResNet_v2_152 preprocessing.
 
-        Maps pixel values to the range [-1, 1].
+         VGG style channel mean subtraction as described here:
+        https://gist.github.com/ksimonyan/211839e770f7b538e2d8#file-readme-md
+        Note that if the number of channels is not equal to 3, the mean subtraction
+        will be skipped and the original resized_inputs will be returned.
 
         Args:
           resized_inputs: A [batch, height_in, width_in, channels] float32 tensor
-            representing a batch of images with values between 0 and 255.0.
+          representing a batch of images with values between 0 and 255.0.
 
         Returns:
           preprocessed_inputs: A [batch, height_out, width_out, channels] float32
-            tensor representing a batch of images.
-
+          tensor representing a batch of images.
         """
-        return (2.0 / 255.0) * resized_inputs - 1.0
+        if resized_inputs.shape.as_list()[3] == 3:
+            channel_means = [123.68, 116.779, 103.939]
+            return resized_inputs - [[channel_means]]
+        else:
+            return resized_inputs
 
     def _extract_anchor_features(self, preprocessed_inputs, scope):
         if len(preprocessed_inputs.get_shape().as_list()) != 4:
@@ -97,4 +102,3 @@ class IJCAIResNet152FeatureExtractor(ijcai_meta_arch.IJCAIFeatureExtractor):
                         raise ValueError('All the feature maps were not found to be of the same size.')
 
                     return concatenated_feature_map
-
