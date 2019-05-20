@@ -5,8 +5,6 @@ from object_detection.anchor_generators import grid_anchor_generator
 from object_detection.utils import shape_utils
 
 
-
-
 class IJCAIFeatureExtractor(object):
     def __init__(self, name, is_training,
                  output_stride, batch_norm_trainable=False,
@@ -114,8 +112,10 @@ class IJCAIFeatureExtractor(object):
                     variables_to_restore[var_name] = variable
         return variables_to_restore
 
+
 class IJCAIDetectionModel(model.DetectionModel):
     """IJCAI Detector Meta-architecture definition."""
+
     def __init__(self, is_training,
                  num_classes,
                  image_resizer_fn,
@@ -312,6 +312,22 @@ class IJCAIDetectionModel(model.DetectionModel):
             return (self._feature_extractor.preprocess(resized_inputs),
                     true_image_shapes)
 
+    @staticmethod
+    def _compute_clip_window(image_shapes):
+        """Computes clip window for non max suppression based on image shapes.
+        This function assumes that the clip window's left top corner is at (0, 0).
+        Args:
+          image_shapes: A 2-D int32 tensor of shape [batch_size, 3] containing
+          shapes of images in the batch. Each row represents [height, width,
+          channels] of an image.
+        Returns:
+          A 2-D float32 tensor of shape [batch_size, 4] containing the clip window
+          for each image in the form [ymin, xmin, ymax, xmax].
+        """
 
-
-
+        clip_heights = image_shapes[:, 0]
+        clip_widths = image_shapes[:, 1]
+        clip_window = tf.to_float(tf.stack([tf.zeros_like(clip_heights),
+                                            tf.zeros_like(clip_heights),
+                                            clip_heights, clip_widths], axis=1))
+        return clip_window
