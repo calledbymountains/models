@@ -4,6 +4,8 @@ from object_detection.core import model
 from object_detection.anchor_generators import grid_anchor_generator
 from object_detection.utils import shape_utils
 
+slim = tf.contrib.slim
+
 
 class IJCAIFeatureExtractor(object):
     def __init__(self, name, is_training,
@@ -120,6 +122,7 @@ class IJCAIDetectionModel(model.DetectionModel):
                  num_classes,
                  image_resizer_fn,
                  feature_extractor,
+                 depthwise_dict,
                  anchor_generator,
                  coarse_target_assigner,
                  coarse_box_predictor_arg_scope_fn,
@@ -261,6 +264,7 @@ class IJCAIDetectionModel(model.DetectionModel):
                              'grid_anchor_generator.GridAnchorGenerator.')
         self._image_resizer_fn = image_resizer_fn
         self._feature_extractor = feature_extractor
+        self._depthwise_dict = depthwise_dict
         self._anchor_generator = anchor_generator
         self._coarse_target_assigner = coarse_target_assigner
         self._coarse_box_predictor_arg_scope_fn = coarse_box_predictor_arg_scope_fn
@@ -331,3 +335,17 @@ class IJCAIDetectionModel(model.DetectionModel):
                                             tf.zeros_like(clip_heights),
                                             clip_heights, clip_widths], axis=1))
         return clip_window
+
+    def build_depthwise_separable_layer(self, input_feature_map):
+        depthwise_arg_fn = self._depthwise_dict['arg_fn']
+        if isinstance(depthwise_arg_fn, dict):
+            return input_feature_map
+
+        output_filters = self._depthwise_dict['numfilters']
+        depth_multiplier = self._depthwise_dict['depth_multiplier']
+        with slim.arg_scope(depthwise_arg_fn):
+            output = slim.separable_convolution2d(input_feature_map,
+                                                  output_filters,
+                                                  3,
+                                                  depth_multiplier)
+        return output
