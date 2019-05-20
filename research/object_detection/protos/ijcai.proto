@@ -1,0 +1,35 @@
+syntax = "proto2";
+
+package object_detection.protos;
+
+import "object_detection/protos/image_resizer.proto";
+import "object_detection/protos/anchor_generator.proto";
+
+
+message IJCAIDetector {
+    // Number of classes to predict.
+    optional int32 num_classes = 3;
+    // Image resizer for preprocessing the input image.
+    optional ImageResizer image_resizer = 4;
+    //Anchor Parameters.
+    // Feature extractor config.
+    optional IJCAIFeatureExtractor feature_extractor = 5;
+    // Anchor generator to compute anchors.
+    optional AnchorGenerator first_stage_anchor_generator = 6;
+
+
+}
+
+message IJCAIFeatureExtractor {
+    // Type of IJCAIDetector model (e.g., 'faster_rcnn_resnet101';
+    // See builders/model_builder.py for expected types).
+    optional string type = 1;
+
+    // Output stride of extracted feature map.
+    optional int32 output_stride = 2 [default = 16];
+
+    // Whether to update batch norm parameters during training or not.
+    // When training with a relative large batch size (e.g. 8), it could be
+    // desirable to enable batch norm update.
+    optional bool batch_norm_trainable = 3 [default = false];
+}
