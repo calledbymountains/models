@@ -4,19 +4,31 @@ package object_detection.protos;
 
 import "object_detection/protos/image_resizer.proto";
 import "object_detection/protos/anchor_generator.proto";
+import "object_detection/protos/hyperparams.proto";
 
 
 message IJCAIDetector {
     // Number of classes to predict.
-    optional int32 num_classes = 3;
+    optional int32 num_classes = 1;
     // Image resizer for preprocessing the input image.
-    optional ImageResizer image_resizer = 4;
-    //Anchor Parameters.
+    optional ImageResizer image_resizer = 2;
     // Feature extractor config.
-    optional IJCAIFeatureExtractor feature_extractor = 5;
-    // Anchor generator to compute anchors.
-    optional AnchorGenerator first_stage_anchor_generator = 6;
+    optional IJCAIFeatureExtractor feature_extractor = 3;
+    // Depthwise Separable config
 
+    //HyperParams
+    optional Hyperparams depthwise_hyperparams = 4;
+    // If use depthwise separable convolution
+    optional bool use_depthwise = 5 [default = true];
+    // Number of filters to use
+    optional int32 numfilters = 6 [default = 1024];
+    // Depth multiplier
+    optional int32 depth_multiplier = 7 [default = 1];
+
+    //Semantic Segmentation Config
+    
+    // Anchor generator to compute anchors.
+    optional AnchorGenerator first_stage_anchor_generator = 8;
 
 }
 
