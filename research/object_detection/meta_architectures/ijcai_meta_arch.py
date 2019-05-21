@@ -123,6 +123,7 @@ class IJCAIDetectionModel(model.DetectionModel):
                  image_resizer_fn,
                  feature_extractor,
                  depthwise_dict,
+                 segmentation_list,
                  anchor_generator,
                  coarse_target_assigner,
                  coarse_box_predictor_arg_scope_fn,
@@ -265,6 +266,7 @@ class IJCAIDetectionModel(model.DetectionModel):
         self._image_resizer_fn = image_resizer_fn
         self._feature_extractor = feature_extractor
         self._depthwise_dict = depthwise_dict
+        self._segmentation_list = segmentation_list
         self._anchor_generator = anchor_generator
         self._coarse_target_assigner = coarse_target_assigner
         self._coarse_box_predictor_arg_scope_fn = coarse_box_predictor_arg_scope_fn
@@ -343,9 +345,34 @@ class IJCAIDetectionModel(model.DetectionModel):
 
         output_filters = self._depthwise_dict['numfilters']
         depth_multiplier = self._depthwise_dict['depth_multiplier']
-        with slim.arg_scope(depthwise_arg_fn):
+        with slim.arg_scope(depthwise_arg_fn()):
             output = slim.separable_convolution2d(input_feature_map,
                                                   output_filters,
                                                   3,
                                                   depth_multiplier)
         return output
+
+    def build_segmentation_layer(self, input_feature_map):
+        if not self._segmentation_list:
+            return input_feature_map
+
+        num_branches = len(self._segmentation_list)
+        tf.logging.info('Number of segmentation branches : {}.'.format(num_branches))
+        with tf.variable_scope('Segmentation_Layer', values=[input_feature_map]):
+            output = []
+            for branch in self._segmentation_list:
+                atrous_rate = branch['atrous_rate']
+                numfilters = branch['numfilters']
+                segmentation_arg_fn = branch['arg_fn']
+                with slim.arg_scope(segmentation_arg_fn()):
+                    out = slim.convolution2d(input_feature_map,
+                                             numfilters,
+                                             3,
+                                             rate=atrous_rate)
+                    output.append(out)
+
+            output = tf.concat(output, axis=3)
+
+        return output
+
+        pass
