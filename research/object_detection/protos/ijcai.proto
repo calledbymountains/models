@@ -28,8 +28,11 @@ message IJCAIDetector {
     //Semantic Segmentation Config
     optional SegmentationLayer segmentation_layer=8;
     
+    //Anchor related configuration
     // Anchor generator to compute anchors.
     optional AnchorGenerator first_stage_anchor_generator = 9;
+    optional int32 C_value=10[default=100];
+
 
 }
 
@@ -55,5 +58,17 @@ message SemanticFilter{
     optional int32 atrous_rate=1[default=1];
     optional int32 numfilters=2[default=256];
     optional Hyperparams semantic_hyperparams=3;
+    optional int32 kernel_height=4[default=3];
+    optional int32 kernel_width=5[default=3];
 }
 
+message AttentionCombinerLayer{
+    repeated CombinerFilter combiner_filter =1;
+
+}
+message CombinerFilter{
+        optional int32 kernel_height=1[default=3];
+        optional int32 kernel_width=2[default=3];
+        optional Hyperparams combiner_hyperparams=3;
+        optional int32 numfilters=4;
+    }
