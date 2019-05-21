@@ -3,6 +3,7 @@ import tensorflow as tf
 from object_detection.core import model
 from object_detection.anchor_generators import grid_anchor_generator
 from object_detection.utils import shape_utils
+from object_detection.core import box_list_ops
 
 slim = tf.contrib.slim
 
@@ -124,7 +125,9 @@ class IJCAIDetectionModel(model.DetectionModel):
                  feature_extractor,
                  depthwise_dict,
                  segmentation_list,
+                 attention_combiner_list,
                  anchor_generator,
+                 C_value,
                  coarse_target_assigner,
                  coarse_box_predictor_arg_scope_fn,
                  coarse_box_predictor_kernel_size,
@@ -263,11 +266,15 @@ class IJCAIDetectionModel(model.DetectionModel):
                           grid_anchor_generator.GridAnchorGenerator):
             raise ValueError('first_stage_anchor_generator must be of type '
                              'grid_anchor_generator.GridAnchorGenerator.')
+        if C_value <= 0:
+            raise ValueError('The parameter C_value must be >0.')
         self._image_resizer_fn = image_resizer_fn
         self._feature_extractor = feature_extractor
         self._depthwise_dict = depthwise_dict
         self._segmentation_list = segmentation_list
+        self._attention_combiner_list = attention_combiner_list
         self._anchor_generator = anchor_generator
+        self._C_value = C_value
         self._coarse_target_assigner = coarse_target_assigner
         self._coarse_box_predictor_arg_scope_fn = coarse_box_predictor_arg_scope_fn
         self._coarse_box_predictor_kernel_size = coarse_box_predictor_kernel_size
@@ -281,6 +288,7 @@ class IJCAIDetectionModel(model.DetectionModel):
         self._clip_anchors_to_image = clip_anchors_to_image
         self._use_static_shapes = use_static_shapes
         self._parallel_iterations = parallel_iterations
+        self._image_shape = None
 
     def preprocess(self, inputs):
         """Feature-extractor specific preprocessing.
@@ -354,7 +362,7 @@ class IJCAIDetectionModel(model.DetectionModel):
 
     def build_segmentation_layer(self, input_feature_map):
         if not self._segmentation_list:
-            return input_feature_map
+            raise ValueError('Semantic segmentation layer infomation must be specified.')
 
         num_branches = len(self._segmentation_list)
         tf.logging.info('Number of segmentation branches : {}.'.format(num_branches))
@@ -363,11 +371,14 @@ class IJCAIDetectionModel(model.DetectionModel):
             for branch in self._segmentation_list:
                 atrous_rate = branch['atrous_rate']
                 numfilters = branch['numfilters']
+                kernel_height = branch['kernel_height']
+                kernel_width = branch['kernel_width']
+                kernel_size = (kernel_height, kernel_width)
                 segmentation_arg_fn = branch['arg_fn']
                 with slim.arg_scope(segmentation_arg_fn()):
                     out = slim.convolution2d(input_feature_map,
                                              numfilters,
-                                             3,
+                                             kernel_size=kernel_size,
                                              rate=atrous_rate)
                     output.append(out)
 
@@ -375,4 +386,147 @@ class IJCAIDetectionModel(model.DetectionModel):
 
         return output
 
-        pass
+    def build_attention_combiner_layer(self, input_feature_map):
+        if not self._attention_combiner_list:
+            tf.logging.info('No attention combiner information was found in the configuration file.'
+                            ' No attention combiner layer would be created.')
+            return input_feature_map
+
+        num_layers = len(self._attention_combiner_list)
+        tf.logging.info('Number of convolutions in Attention combiner layer : {}.'.format(num_layers))
+        with tf.variable_scope('AttentionCombiner_Layer', values=[input_feature_map]):
+            output = input_feature_map
+            for layer in self._attention_combiner_list:
+                numfilters = layer['numfilters']
+                kernel_height = layer['kernel_height']
+                kernel_width = layer['kernel_width']
+                kernel_size = (kernel_height, kernel_width)
+                combiner_arg_fn = layer['arg_fn']
+                with slim.arg_scope(combiner_arg_fn()):
+                    output = slim.convolution2d(inputs=output,
+                                                num_outputs=numfilters,
+                                                kernel_size=kernel_size,
+                                                )
+
+        return output
+
+    @property
+    def feature_extractor_scope(self):
+        return 'FeatureExtractor'
+
+    def predict(self, preprocessed_inputs, true_image_shapes):
+        """Predicts unpostprocessed tensors from input tensor.
+        This function takes an input batch of images and runs it through the
+        forward pass of the network to yield "raw" un-postprocessed predictions.
+        If `number_of_stages` is 1, this function only returns first stage
+        RPN predictions (un-postprocessed).  Otherwise it returns both
+        first stage RPN predictions as well as second stage box classifier
+        predictions.
+        Other remarks:
+        + Anchor pruning vs. clipping: following the recommendation of the Faster
+        R-CNN paper, we prune anchors that venture outside the image window at
+        training time and clip anchors to the image window at inference time.
+        + Proposal padding: as described at the top of the file, proposals are
+        padded to self._max_num_proposals and flattened so that proposals from all
+        images within the input batch are arranged along the same batch dimension.
+        Args:
+        preprocessed_inputs: a [batch, height, width, channels] float tensor
+        representing a batch of images.
+        true_image_shapes: int32 tensor of shape [batch, 3] where each row is
+        of the form [height, width, channels] indicating the shapes
+        of true images in the resized images, as resized images can be padded
+        with zeros.
+        Returns:
+        prediction_dict: a dictionary holding "raw" prediction tensors:
+        1) rpn_box_predictor_features: A 4-D float32 tensor with shape
+        [batch_size, height, width, depth] to be used for predicting proposal
+        boxes and corresponding objectness scores.
+        2) rpn_features_to_crop: A 4-D float32 tensor with shape
+        [batch_size, height, width, depth] representing image features to crop
+        using the proposal boxes predicted by the RPN.
+        3) image_shape: a 1-D tensor of shape [4] representing the input
+        image shape.
+        4) rpn_box_encodings:  3-D float tensor of shape
+        [batch_size, num_anchors, self._box_coder.code_size] containing
+        predicted boxes.
+        5) rpn_objectness_predictions_with_background: 3-D float tensor of shape
+        [batch_size, num_anchors, 2] containing class
+        predictions (logits) for each of the anchors.  Note that this
+        tensor *includes* background class predictions (at class index 0).
+        6) anchors: A 2-D tensor of shape [num_anchors, 4] representing anchors
+        for the first stage RPN (in absolute coordinates).  Note that
+        `num_anchors` can differ depending on whether the model is created in
+        training or inference mode.
+        (and if number_of_stages > 1):
+        7) refined_box_encodings: a 3-D tensor with shape
+        [total_num_proposals, num_classes, self._box_coder.code_size]
+        representing predicted (final) refined box encodings, where
+        total_num_proposals=batch_size*self._max_num_proposals. If using
+        a shared box across classes the shape will instead be
+        [total_num_proposals, 1, self._box_coder.code_size].
+        8) class_predictions_with_background: a 3-D tensor with shape
+        [total_num_proposals, num_classes + 1] containing class
+        predictions (logits) for each of the anchors, where
+        total_num_proposals=batch_size*self._max_num_proposals.
+        Note that this tensor *includes* background class predictions
+        (at class index 0).
+        9) num_proposals: An int32 tensor of shape [batch_size] representing the
+        number of proposals generated by the RPN.  `num_proposals` allows us
+        to keep track of which entries are to be treated as zero paddings and
+        which are not since we always pad the number of proposals to be
+        `self.max_num_proposals` for each image.
+        10) proposal_boxes: A float32 tensor of shape
+        [batch_size, self.max_num_proposals, 4] representing
+        decoded proposal bounding boxes in absolute coordinates.
+        11) mask_predictions: (optional) a 4-D tensor with shape
+        [total_num_padded_proposals, num_classes, mask_height, mask_width]
+        containing instance mask predictions.
+        Raises:
+        ValueError: If `predict` is called before `preprocess`.
+        """
+        self._image_shape = tf.shape(preprocessed_inputs)
+        feature_extractor_output_map = self._feature_extractor.extract_input_features(
+            preprocessed_inputs,
+            scope=self.feature_extractor_scope
+        )
+
+        depthwise_separable_output_feature_map = self.build_depthwise_separable_layer(feature_extractor_output_map)
+
+        semantic_segmentation_output_feature_map = self.build_segmentation_layer(depthwise_separable_output_feature_map)
+
+        attention_combiner_output_feature_map = self.build_attention_combiner_layer(
+            semantic_segmentation_output_feature_map)
+
+        attention_confidence_output = tf.nn.softmax(attention_combiner_output_feature_map,
+                                                    axis=3)
+
+        foreground_confidence_output = tf.expand_dims(tf.reduce_max(attention_confidence_output[:, :, :, 1:], axis=3),
+                                                      axis=3)
+
+        foreground_confidence_output_flattened = tf.reshape(foreground_confidence_output, [self._image_shape[0], -1])
+
+        C_values, _ = tf.nn.top_k(foreground_confidence_output_flattened, axis=1)
+
+        minimum_C_value = tf.reduce_min(C_values, axis=1)
+
+        top_C_locations = tf.map_fn(lambda x: tf.greater_equal(x[0], x[1]),
+                                    (foreground_confidence_output_flattened, minimum_C_value), dtype=tf.bool)
+
+        self._num_anchors_per_location = self._anchor_generator.num_anchors_per_location()
+
+        if len(self._num_anchors_per_location) != 1:
+            raise RuntimeError(
+                'anchor_generator is expected to generate anchors '
+                'corresponding to a single feature map.')
+
+        anchors = self._anchor_generator.generate(
+            [(foreground_confidence_output.shape[1],
+              foreground_confidence_output.shape[2])])
+
+        # We make sure that we clip all the anchors to the image size.
+        anchors = box_list_ops.clip_to_window(anchors, window=[0.0, 0.0,
+                                                               tf.cast(self._image_shape[
+                                                                           1], tf.float32),
+                                                               tf.cast(self._image_shape[
+                                                                           2], tf.float32)])
+
