@@ -26,9 +26,10 @@ message IJCAIDetector {
     optional int32 depth_multiplier = 7 [default = 1];
 
     //Semantic Segmentation Config
+    optional SegmentationLayer segmentation_layer=8;
     
     // Anchor generator to compute anchors.
-    optional AnchorGenerator first_stage_anchor_generator = 8;
+    optional AnchorGenerator first_stage_anchor_generator = 9;
 
 }
 
@@ -45,3 +46,14 @@ message IJCAIFeatureExtractor {
     // desirable to enable batch norm update.
     optional bool batch_norm_trainable = 3 [default = false];
 }
+
+message SegmentationLayer{
+    repeated SemanticFilter semantic_filter=1;
+}
+
+message SemanticFilter{
+    optional int32 atrous_rate=1[default=1];
+    optional int32 numfilters=2[default=256];
+    optional Hyperparams semantic_hyperparams=3;
+}
+
