@@ -27,10 +27,13 @@ def int64_list_feature(value):
 
 
 def bytes_feature(value):
+  if isinstance(value, str):
+    value = value.encode()
   return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
 
 
 def bytes_list_feature(value):
+  value = [x.encode() if isinstance(x, str) else x for x in value]
   return tf.train.Feature(bytes_list=tf.train.BytesList(value=value))
 
 
