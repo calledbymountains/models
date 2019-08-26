@@ -194,6 +194,15 @@ class TfExampleDecoder(data_decoder.DataDecoder):
             tf.VarLenFeature(tf.float32),
         'image/object/bbox/ymax':
             tf.VarLenFeature(tf.float32),
+        # Object visible boxes and classes.
+        'image/object/visible/bbox/xmin':
+            tf.VarLenFeature(tf.float32),
+        'image/object/visible/bbox/xmax':
+            tf.VarLenFeature(tf.float32),
+        'image/object/visible/bbox/ymin':
+            tf.VarLenFeature(tf.float32),
+        'image/object/visible/bbox/ymax':
+            tf.VarLenFeature(tf.float32),
         'image/object/class/label':
             tf.VarLenFeature(tf.int64),
         'image/object/class/text':
@@ -208,6 +217,9 @@ class TfExampleDecoder(data_decoder.DataDecoder):
             tf.VarLenFeature(tf.int64),
         'image/object/weight':
             tf.VarLenFeature(tf.float32),
+        # Image mask
+        'image/object/mask/encoded':
+            tf.FixedLenFeature((), tf.string, default_value='')
 
     }
     # We are checking `dct_method` instead of passing it directly in order to
@@ -245,6 +257,9 @@ class TfExampleDecoder(data_decoder.DataDecoder):
         fields.InputDataFields.groundtruth_boxes: (
             slim_example_decoder.BoundingBox(['ymin', 'xmin', 'ymax', 'xmax'],
                                              'image/object/bbox/')),
+        fields.InputDataFields.groundtruth_visible_boxes: (
+            slim_example_decoder.BoundingBox(['ymin', 'xmin', 'ymax', 'xmax'],
+                                             'image/object/visible/bbox/')),
         fields.InputDataFields.groundtruth_area:
             slim_example_decoder.Tensor('image/object/area'),
         fields.InputDataFields.groundtruth_is_crowd: (
@@ -255,6 +270,7 @@ class TfExampleDecoder(data_decoder.DataDecoder):
             slim_example_decoder.Tensor('image/object/group_of')),
         fields.InputDataFields.groundtruth_weights: (
             slim_example_decoder.Tensor('image/object/weight')),
+        fields.InputDataFields.mask_image: slim_example_decoder.Tensor('image/object/mask/encoded')
 
     }
     if load_multiclass_scores:
